@@ -34,21 +34,20 @@ From the repo root:
 ```powershell
 cd cloudflare
 npm create cloudflare@latest -- --help
-npm install -g wrangler
-wrangler login
+npx.cmd wrangler login
 ```
 
 Add secrets:
 
 ```powershell
-wrangler secret put TELEGRAM_BOT_TOKEN
-wrangler secret put TELEGRAM_ALLOWED_CHAT_ID
-wrangler secret put TELEGRAM_WEBHOOK_SECRET
-wrangler secret put ALPACA_API_KEY_ID
-wrangler secret put ALPACA_API_SECRET_KEY
-wrangler secret put SUPABASE_URL
-wrangler secret put SUPABASE_SERVICE_ROLE_KEY
-wrangler secret put BOT_OWNER_ID
+npx.cmd wrangler secret put TELEGRAM_BOT_TOKEN
+npx.cmd wrangler secret put TELEGRAM_ALLOWED_CHAT_ID
+npx.cmd wrangler secret put TELEGRAM_WEBHOOK_SECRET
+npx.cmd wrangler secret put ALPACA_API_KEY_ID
+npx.cmd wrangler secret put ALPACA_API_SECRET_KEY
+npx.cmd wrangler secret put SUPABASE_URL
+npx.cmd wrangler secret put SUPABASE_SERVICE_ROLE_KEY
+npx.cmd wrangler secret put BOT_OWNER_ID
 ```
 
 Use a random secret for `TELEGRAM_WEBHOOK_SECRET`, for example:
@@ -60,7 +59,7 @@ Use a random secret for `TELEGRAM_WEBHOOK_SECRET`, for example:
 Deploy:
 
 ```powershell
-wrangler deploy
+npx.cmd wrangler deploy
 ```
 
 Wrangler prints your worker URL, like:
