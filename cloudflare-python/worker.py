@@ -18,13 +18,19 @@ DEFAULTS = {
     "MAX_DAILY_LOSS_PCT": "3",
     "MIN_CONFIDENCE": "72",
     "BAR_TIMEFRAME": "5Min",
+    "HIGHER_TIMEFRAME": "1Hour",
     "ATR_STOP_MULTIPLIER": "1.5",
     "TAKE_PROFIT_R_MULTIPLIER": "2",
+    "MIN_RISK_REWARD": "1.7",
+    "MAX_POSITION_VALUE_PCT": "20",
     "COOLDOWN_MINUTES": "30",
+    "MARKET_OPEN_ONLY": "true",
+    "ANTHROPIC_MODEL": "claude-sonnet-4-5",
 }
 
 ALPACA_PAPER_API = "https://paper-api.alpaca.markets"
 ALPACA_DATA_API = "https://data.alpaca.markets"
+ANTHROPIC_API = "https://api.anthropic.com/v1/messages"
 
 
 def to_js(obj):
@@ -34,6 +40,24 @@ def to_js(obj):
 def env_value(env, key, fallback=""):
     value = getattr(env, key, fallback)
     return "" if value is None else str(value)
+
+
+def as_bool(value):
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def clamp_float(value, default, min_value, max_value):
+    try:
+        number = float(value)
+    except Exception:
+        number = default
+    if not math.isfinite(number):
+        number = default
+    return max(min_value, min(max_value, number))
+
+
+def clamp_int(value, default, min_value, max_value):
+    return int(round(clamp_float(value, default, min_value, max_value)))
 
 
 async def request_json(url, method="GET", headers=None, body=None):
@@ -165,16 +189,20 @@ async def get_watchlist(env):
 
 async def get_risk(env):
     return {
-        "risk_pct": float(await get_setting(env, "RISK_PER_TRADE_PCT")),
-        "stop_pct": float(await get_setting(env, "STOP_LOSS_PCT")),
-        "take_profit_pct": float(await get_setting(env, "TAKE_PROFIT_PCT")),
-        "max_positions": int(float(await get_setting(env, "MAX_OPEN_POSITIONS"))),
-        "max_daily_loss_pct": float(await get_setting(env, "MAX_DAILY_LOSS_PCT")),
-        "min_confidence": float(await get_setting(env, "MIN_CONFIDENCE")),
+        "risk_pct": clamp_float(await get_setting(env, "RISK_PER_TRADE_PCT"), 1, 0.1, 5),
+        "stop_pct": clamp_float(await get_setting(env, "STOP_LOSS_PCT"), 2, 0.25, 15),
+        "take_profit_pct": clamp_float(await get_setting(env, "TAKE_PROFIT_PCT"), 4, 0.5, 40),
+        "max_positions": clamp_int(await get_setting(env, "MAX_OPEN_POSITIONS"), 3, 1, 10),
+        "max_daily_loss_pct": clamp_float(await get_setting(env, "MAX_DAILY_LOSS_PCT"), 3, 0.5, 20),
+        "min_confidence": clamp_float(await get_setting(env, "MIN_CONFIDENCE"), 72, 50, 95),
         "timeframe": await get_setting(env, "BAR_TIMEFRAME"),
-        "atr_stop_multiplier": float(await get_setting(env, "ATR_STOP_MULTIPLIER")),
-        "take_profit_r": float(await get_setting(env, "TAKE_PROFIT_R_MULTIPLIER")),
-        "cooldown_minutes": float(await get_setting(env, "COOLDOWN_MINUTES")),
+        "higher_timeframe": await get_setting(env, "HIGHER_TIMEFRAME"),
+        "atr_stop_multiplier": clamp_float(await get_setting(env, "ATR_STOP_MULTIPLIER"), 1.5, 0.5, 5),
+        "take_profit_r": clamp_float(await get_setting(env, "TAKE_PROFIT_R_MULTIPLIER"), 2, 0.5, 8),
+        "min_rr": clamp_float(await get_setting(env, "MIN_RISK_REWARD"), 1.7, 0.5, 5),
+        "max_position_value_pct": clamp_float(await get_setting(env, "MAX_POSITION_VALUE_PCT"), 20, 1, 100),
+        "cooldown_minutes": clamp_float(await get_setting(env, "COOLDOWN_MINUTES"), 30, 1, 1440),
+        "market_open_only": as_bool(await get_setting(env, "MARKET_OPEN_ONLY")),
     }
 
 
@@ -185,6 +213,15 @@ async def fetch_account(env):
 async def fetch_positions(env):
     data = await alpaca(env, "/v2/positions")
     return data if isinstance(data, list) else []
+
+
+async def fetch_open_orders(env):
+    data = await alpaca(env, "/v2/orders?status=open&limit=100")
+    return data if isinstance(data, list) else []
+
+
+async def fetch_clock(env):
+    return await alpaca(env, "/v2/clock")
 
 
 async def fetch_bars(env, symbol, timeframe="5Min", limit=160):
@@ -359,18 +396,70 @@ def analyze_bars(bars, risk):
     stop_distance = max(atr * risk["atr_stop_multiplier"], price * risk["stop_pct"] / 100)
     stop = round_price(price - stop_distance)
     target = round_price(price + stop_distance * risk["take_profit_r"])
-    action = "BUY" if confidence >= risk["min_confidence"] and not trend_down else "HOLD"
+    rr = (target - price) / max(price - stop, 0.0001)
+    volatility_pct = (atr / price) * 100 if price else 0
+    action = "BUY" if confidence >= risk["min_confidence"] and not trend_down and rr >= risk["min_rr"] else "HOLD"
+    if rr < risk["min_rr"]:
+        reasons.append(f"Risk/reward below {risk['min_rr']:.1f}R")
     return {
         "action": action, "confidence": confidence, "price": price, "stop": stop, "target": target,
         "atr": atr, "rsi": rsi, "macd_hist": macd_hist, "trend": "up" if trend_up else "down" if trend_down else "mixed",
-        "pattern": pattern["name"] if pattern else "", "reasons": reasons,
+        "pattern": pattern["name"] if pattern else "", "reasons": reasons, "rr": rr, "volatility_pct": volatility_pct,
     }
 
 
+async def analyze_symbol(env, symbol, risk):
+    analysis = analyze_bars(await fetch_bars(env, symbol, risk["timeframe"], 180), risk)
+    analysis["symbol"] = symbol
+    analysis["timeframe"] = risk["timeframe"]
+    analysis["higher_timeframe"] = {"timeframe": risk["higher_timeframe"], "status": "not checked"}
+    if analysis["action"] == "WARMUP" or not analysis.get("price"):
+        return analysis
+
+    higher = analyze_bars(await fetch_bars(env, symbol, risk["higher_timeframe"], 180), risk)
+    if higher["action"] == "WARMUP" or not higher.get("price"):
+        analysis["confidence"] = max(1, analysis["confidence"] - 5)
+        analysis["higher_timeframe"] = {"timeframe": risk["higher_timeframe"], "status": "warmup"}
+        analysis["reasons"].append("Higher timeframe has limited confirmation data")
+    else:
+        analysis["higher_timeframe"] = {
+            "timeframe": risk["higher_timeframe"],
+            "trend": higher["trend"],
+            "confidence": higher["confidence"],
+            "rsi": higher["rsi"],
+            "macd_hist": higher["macd_hist"],
+        }
+        if higher["trend"] == "up" and higher["confidence"] >= 55:
+            analysis["confidence"] = min(96, analysis["confidence"] + 6)
+            analysis["reasons"].append(f"{risk['higher_timeframe']} trend confirms")
+        elif higher["trend"] == "down":
+            analysis["confidence"] = max(1, analysis["confidence"] - 18)
+            analysis["reasons"].append(f"{risk['higher_timeframe']} trend disagrees")
+        else:
+            analysis["confidence"] = max(1, analysis["confidence"] - 4)
+            analysis["reasons"].append(f"{risk['higher_timeframe']} trend is mixed")
+
+    if analysis["volatility_pct"] > 6:
+        analysis["confidence"] = max(1, analysis["confidence"] - 10)
+        analysis["reasons"].append("ATR volatility is high for risk settings")
+    analysis["action"] = (
+        "BUY"
+        if analysis["confidence"] >= risk["min_confidence"]
+        and analysis["trend"] != "down"
+        and analysis["rr"] >= risk["min_rr"]
+        else "HOLD"
+    )
+    return analysis
+
+
 def position_size(equity, price, risk, stop_price=None):
+    if price <= 0:
+        return 0
     risk_dollars = equity * risk["risk_pct"] / 100
     risk_per_share = abs(price - stop_price) if stop_price else price * risk["stop_pct"] / 100
-    return max(0, math.floor(risk_dollars / max(risk_per_share, 0.01)))
+    risk_qty = math.floor(risk_dollars / max(risk_per_share, 0.01))
+    max_value_qty = math.floor((equity * risk["max_position_value_pct"] / 100) / price)
+    return max(0, min(risk_qty, max_value_qty))
 
 
 def now_ms():
@@ -391,6 +480,54 @@ async def set_cooldown(env, symbol, risk):
     await state_put(env, f"COOLDOWN:{symbol}", str(until))
 
 
+def trading_day():
+    return time.strftime("%Y-%m-%d", time.gmtime())
+
+
+async def day_start_equity(env, equity):
+    key = "EQUITY_DAY_START"
+    today = trading_day()
+    stored = await state_get(env, key)
+    if isinstance(stored, dict) and stored.get("date") == today:
+        try:
+            return float(stored.get("equity") or equity)
+        except Exception:
+            pass
+    await state_put(env, key, {"date": today, "equity": equity})
+    return equity
+
+
+async def daily_loss_guard(env, account, risk):
+    equity = float(account.get("equity") or account.get("portfolio_value") or 0)
+    baseline = await day_start_equity(env, equity)
+    daily_loss = equity - baseline
+    limit = -(baseline * risk["max_daily_loss_pct"] / 100)
+    return daily_loss <= limit, daily_loss, baseline
+
+
+async def trade_slot_status(env, symbol, risk):
+    positions = await fetch_positions(env)
+    open_orders = await fetch_open_orders(env)
+    open_order_symbols = {str(o.get("symbol") or "").upper() for o in open_orders}
+    position_symbols = {str(p.get("symbol") or "").upper() for p in positions}
+    committed_symbols = position_symbols | open_order_symbols
+    if len(committed_symbols) >= risk["max_positions"]:
+        return False, "max positions/open orders reached", positions, open_orders
+    if symbol in committed_symbols:
+        return False, "position or open order already exists", positions, open_orders
+    return True, "", positions, open_orders
+
+
+async def market_is_tradeable(env, risk):
+    if not risk["market_open_only"]:
+        return True, "market-open guard disabled"
+    clock = await fetch_clock(env)
+    if bool(clock.get("is_open")):
+        return True, "market is open"
+    next_open = clock.get("next_open") or "next session"
+    return False, f"market is closed until {next_open}"
+
+
 async def submit_bracket_buy(env, symbol, qty, analysis):
     return await alpaca(env, "/v2/orders", method="POST", body={
         "symbol": symbol,
@@ -408,13 +545,93 @@ def strategy_text(risk):
     return "\n".join([
         "Advanced Python Worker paper strategy:",
         f"Timeframe: {risk['timeframe']}",
+        f"Higher timeframe confirmation: {risk['higher_timeframe']}",
         f"Minimum confidence: {risk['min_confidence']}%",
+        f"Minimum risk/reward: {risk['min_rr']:.1f}R",
         f"Risk per trade: {risk['risk_pct']}%",
+        f"Max position value: {risk['max_position_value_pct']}% of equity",
         f"ATR stop multiplier: {risk['atr_stop_multiplier']}x",
         f"Take profit: {risk['take_profit_r']}R",
-        "Reads: EMA trend, RSI, MACD, Bollinger position, VWAP, volume, ATR volatility, support/resistance, and candlestick patterns.",
+        f"Market-open guard: {'ON' if risk['market_open_only'] else 'OFF'}",
+        "Reads: EMA trend, higher-timeframe alignment, RSI, MACD, Bollinger position, VWAP, volume, ATR volatility, support/resistance, and candlestick patterns.",
+        "Optional Claude analyst command: /ai AAPL after ANTHROPIC_API_KEY is saved as a Worker secret.",
         "Still educational paper trading only. No method is 100% accurate.",
     ])
+
+
+def compact_analysis(analysis):
+    return {
+        "action": analysis.get("action"),
+        "confidence": analysis.get("confidence"),
+        "price": round_price(float(analysis.get("price") or 0)),
+        "stop": analysis.get("stop"),
+        "target": analysis.get("target"),
+        "risk_reward": round(float(analysis.get("rr") or 0), 2),
+        "trend": analysis.get("trend"),
+        "rsi": round(float(analysis.get("rsi") or 0), 1),
+        "macd_hist": round(float(analysis.get("macd_hist") or 0), 4),
+        "atr": round_price(float(analysis.get("atr") or 0)),
+        "volatility_pct": round(float(analysis.get("volatility_pct") or 0), 2),
+        "pattern": analysis.get("pattern") or "none",
+        "higher_timeframe": analysis.get("higher_timeframe"),
+        "reasons": analysis.get("reasons", [])[-8:],
+    }
+
+
+async def claude_analyst(env, symbol, analysis, risk, positions):
+    api_key = env_value(env, "ANTHROPIC_API_KEY")
+    if not api_key:
+        return "Claude AI is not configured. Add it with: npx.cmd wrangler secret put ANTHROPIC_API_KEY"
+    model = env_value(env, "ANTHROPIC_MODEL") or await get_setting(env, "ANTHROPIC_MODEL")
+    sanitized_positions = [
+        {
+            "symbol": p.get("symbol"),
+            "qty": p.get("qty"),
+            "avg_entry_price": p.get("avg_entry_price"),
+            "unrealized_pl": p.get("unrealized_pl"),
+        }
+        for p in positions[:10]
+    ]
+    prompt = json.dumps(
+        {
+            "symbol": symbol,
+            "paper_trading_only": True,
+            "analysis": compact_analysis(analysis),
+            "risk_settings": risk,
+            "open_positions": sanitized_positions,
+        }
+    )
+    data = await request_json(
+        ANTHROPIC_API,
+        method="POST",
+        headers={
+            "content-type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        },
+        body={
+            "model": model,
+            "max_tokens": 500,
+            "system": (
+                "You are a cautious paper-trading risk analyst. Be concise. "
+                "Do not give financial advice, do not promise accuracy, and do not tell the user to use real money. "
+                "Explain whether the setup is strong, weak, or blocked using the provided indicators and risk settings."
+            ),
+            "messages": [
+                {
+                    "role": "user",
+                    "content": (
+                        "Review this paper-trading setup. Return: verdict, best evidence, main risk, "
+                        "what would invalidate it, and one educational next step.\n\n"
+                        f"{prompt}"
+                    ),
+                }
+            ],
+        },
+    )
+    parts = data.get("content", []) if isinstance(data, dict) else []
+    text = "\n".join(str(part.get("text", "")) for part in parts if isinstance(part, dict) and part.get("type") == "text")
+    return text.strip() or "Claude returned an empty response."
 
 
 async def explain_symbol(env, raw_symbol):
@@ -422,9 +639,10 @@ async def explain_symbol(env, raw_symbol):
     if not symbol:
         return await send_message(env, "Usage: /explain AAPL")
     risk = await get_risk(env)
-    analysis = analyze_bars(await fetch_bars(env, symbol, risk["timeframe"], 160), risk)
+    analysis = await analyze_symbol(env, symbol, risk)
     if not analysis["price"]:
         return await send_message(env, f"No candle data available for {symbol}.")
+    htf = analysis.get("higher_timeframe") or {}
     return await send_message(env, "\n".join([
         f"{symbol} Python Worker readout ({risk['timeframe']})",
         f"Action: {analysis['action']}",
@@ -432,10 +650,25 @@ async def explain_symbol(env, raw_symbol):
         f"Price: {money(analysis['price'])}",
         f"RSI: {analysis['rsi']:.1f} | MACD hist: {analysis['macd_hist']:.3f}",
         f"Trend: {analysis['trend']}",
+        f"Higher TF: {htf.get('trend', htf.get('status', 'unknown'))}",
         f"ATR: {money(analysis['atr'])} | Stop: {money(analysis['stop'])} | Target: {money(analysis['target'])}",
+        f"Risk/reward: {analysis.get('rr', 0):.2f}R",
         f"Pattern: {analysis['pattern'] or 'none'}",
         f"Why: {'; '.join(analysis['reasons'])}",
     ]))
+
+
+async def ai_symbol(env, raw_symbol):
+    symbol = normalize_symbol(raw_symbol)
+    if not symbol:
+        return await send_message(env, "Usage: /ai AAPL")
+    risk = await get_risk(env)
+    analysis = await analyze_symbol(env, symbol, risk)
+    if not analysis.get("price"):
+        return await send_message(env, f"No candle data available for {symbol}.")
+    positions = await fetch_positions(env)
+    ai_text = await claude_analyst(env, symbol, analysis, risk, positions)
+    return await send_message(env, f"Claude paper-trading review for {symbol}\n\n{ai_text}")
 
 
 async def manual_paper_buy(env, raw_symbol):
@@ -445,14 +678,20 @@ async def manual_paper_buy(env, raw_symbol):
     risk = await get_risk(env)
     account = await fetch_account(env)
     equity = float(account.get("equity") or account.get("portfolio_value") or 0)
-    open_positions = await fetch_positions(env)
-    if len(open_positions) >= risk["max_positions"]:
-        return await send_message(env, f"Risk guard blocked {symbol}: max positions reached.")
-    if any(p.get("symbol") == symbol for p in open_positions):
-        return await send_message(env, f"Risk guard blocked {symbol}: position already open.")
+    daily_blocked, daily_loss, baseline = await daily_loss_guard(env, account, risk)
+    if daily_blocked:
+        return await send_message(env, f"Risk guard blocked {symbol}: daily loss limit hit ({money(daily_loss)} from {money(baseline)} baseline).")
+    market_ok, market_reason = await market_is_tradeable(env, risk)
+    if not market_ok:
+        return await send_message(env, f"Risk guard blocked {symbol}: {market_reason}.")
+    slot_ok, slot_reason, _positions, _orders = await trade_slot_status(env, symbol, risk)
+    if not slot_ok:
+        return await send_message(env, f"Risk guard blocked {symbol}: {slot_reason}.")
     if await cooldown_active(env, symbol):
         return await send_message(env, f"Risk guard blocked {symbol}: cooldown is active.")
-    analysis = analyze_bars(await fetch_bars(env, symbol, risk["timeframe"], 160), risk)
+    analysis = await analyze_symbol(env, symbol, risk)
+    if analysis.get("action") == "WARMUP" or not analysis.get("price") or not analysis.get("stop") or not analysis.get("target"):
+        return await send_message(env, f"Risk guard blocked {symbol}: not enough clean candle data for a bracket order.")
     qty = position_size(equity, analysis["price"], risk, analysis.get("stop"))
     if qty < 1:
         return await send_message(env, f"Risk sizing blocked {symbol}: quantity below 1 share.")
@@ -469,25 +708,31 @@ async def trade_loop(env, notify=False):
     risk = await get_risk(env)
     account = await fetch_account(env)
     equity = float(account.get("equity") or account.get("portfolio_value") or 0)
-    daily_loss = float(account.get("equity") or 0) - float(account.get("last_equity") or account.get("equity") or 0)
-    if daily_loss <= -(equity * risk["max_daily_loss_pct"] / 100):
+    daily_blocked, daily_loss, baseline = await daily_loss_guard(env, account, risk)
+    if daily_blocked:
         await state_put(env, "RUNNING", "false")
-        await send_message(env, f"Daily loss guard triggered ({money(daily_loss)}). Auto-trading stopped.")
+        await log_event(env, "risk_guard", {"reason": "daily_loss", "daily_loss": daily_loss, "baseline": baseline})
+        await send_message(env, f"Daily loss guard triggered ({money(daily_loss)} from {money(baseline)} baseline). Auto-trading stopped.")
+        return
+    market_ok, market_reason = await market_is_tradeable(env, risk)
+    if not market_ok:
+        await log_event(env, "python_scan_blocked", {"reason": "market_closed", "detail": market_reason})
+        if notify:
+            await send_message(env, f"Scan blocked: {market_reason}.")
         return
     summary = {"scanned": 0, "warmup": 0, "hold": 0, "low": 0, "blocked": 0, "orders": 0}
     for symbol in await get_watchlist(env):
         summary["scanned"] += 1
-        positions = await fetch_positions(env)
-        if len(positions) >= risk["max_positions"]:
+        slot_ok, slot_reason, _positions, _orders = await trade_slot_status(env, symbol, risk)
+        if not slot_ok:
             summary["blocked"] += 1
-            break
-        if any(p.get("symbol") == symbol for p in positions):
-            summary["blocked"] += 1
+            if "max positions" in slot_reason:
+                break
             continue
         if await cooldown_active(env, symbol):
             summary["blocked"] += 1
             continue
-        analysis = analyze_bars(await fetch_bars(env, symbol, risk["timeframe"], 160), risk)
+        analysis = await analyze_symbol(env, symbol, risk)
         if analysis["action"] == "WARMUP":
             summary["warmup"] += 1
             continue
@@ -518,14 +763,22 @@ async def status_text(env):
     risk = await get_risk(env)
     account = await fetch_account(env)
     positions = await fetch_positions(env)
+    open_orders = await fetch_open_orders(env)
+    daily_blocked, daily_loss, baseline = await daily_loss_guard(env, account, risk)
+    try:
+        market_ok, market_reason = await market_is_tradeable(env, risk)
+    except Exception as exc:
+        market_ok, market_reason = False, f"market check failed: {exc}"
     return "\n".join([
         f"Python Worker auto-trading: {'ON' if await state_get(env, 'RUNNING') == 'true' else 'OFF'}",
         f"Equity: {money(float(account.get('equity') or 0))}",
         f"Buying power: {money(float(account.get('buying_power') or 0))}",
-        f"Open positions: {len(positions)}/{risk['max_positions']}",
+        f"Day P&L guard: {money(daily_loss)} vs {risk['max_daily_loss_pct']}% max loss ({'BLOCKED' if daily_blocked else 'ok'})",
+        f"Market guard: {'ok' if market_ok else 'blocked'} ({market_reason})",
+        f"Open positions/orders: {len(positions)}/{len(open_orders)} of {risk['max_positions']} slots",
         f"Watchlist: {', '.join(await get_watchlist(env))}",
-            f"Strategy: {risk['timeframe']} candles, min confidence {risk['min_confidence']}%",
-            f"Cooldown after entries: {risk['cooldown_minutes']:.0f} minutes",
+        f"Strategy: {risk['timeframe']} + {risk['higher_timeframe']} confirmation, min confidence {risk['min_confidence']}%",
+        f"Cooldown after entries: {risk['cooldown_minutes']:.0f} minutes",
     ])
 
 
@@ -573,6 +826,7 @@ def help_text():
         "/scan_now - scan now",
         "/paper_buy AAPL - manual risk-sized bracket buy",
         "/explain AAPL - explain candle/indicator readout",
+        "/ai AAPL - optional Claude paper-trading review",
         "/strategy - show strategy settings",
         "/status - show account/bot status",
         "/positions - show positions",
@@ -602,6 +856,8 @@ async def handle_command(env, text):
         return await manual_paper_buy(env, rest[0] if rest else "")
     if cmd == "/explain":
         return await explain_symbol(env, rest[0] if rest else "")
+    if cmd in {"/ai", "/claude"}:
+        return await ai_symbol(env, rest[0] if rest else "")
     if cmd == "/strategy":
         return await send_message(env, strategy_text(await get_risk(env)))
     if cmd == "/status":
