@@ -107,14 +107,17 @@ async function handleCommand(text) {
   const [raw, ...rest] = text.split(/\s+/);
   const cmd = raw.toLowerCase();
   if (cmd === "/start" || cmd === "/help") return sendMessage(helpText());
-  if (cmd === "/start_trading" || cmd === "/starttrading") {
+  if (cmd === "/start_trading" || cmd === "/starttrading" || cmd === "/auto_on") {
     tradingEnabled = true;
-    return sendMessage("Paper auto-trading is ON. I will look for long-only setups on the watchlist.");
+    await sendMessage("Paper auto-trading is ON. I will look for long-only setups on the watchlist.");
+    return tradeLoop(true);
   }
-  if (cmd === "/stop_trading" || cmd === "/stoptrading") {
+  if (cmd === "/stop_trading" || cmd === "/stoptrading" || cmd === "/auto_off") {
     tradingEnabled = false;
     return sendMessage("Paper auto-trading is OFF. Existing paper positions are left alone. Use /close_all to close them.");
   }
+  if (cmd === "/scan_now") return tradeLoop(true);
+  if (cmd === "/paper_buy" || cmd === "/buy") return manualPaperBuy(rest[0]);
   if (cmd === "/status") return sendMessage(await statusText());
   if (cmd === "/positions") return sendMessage(await positionsText());
   if (cmd === "/close_all") return closeAllPositions();
@@ -130,8 +133,10 @@ async function handleCommand(text) {
 function helpText() {
   return [
     "Commands:",
-    "/start_trading - turn paper auto-trading on",
-    "/stop_trading - stop opening new paper trades",
+    "/start_trading or /auto_on - turn paper auto-trading on",
+    "/stop_trading or /auto_off - stop opening new paper trades",
+    "/scan_now - check the watchlist right now",
+    "/paper_buy AAPL - manually open a risk-sized paper bracket buy",
     "/status - show bot/account status",
     "/positions - list open paper positions",
     "/close_all - close all open paper positions",
@@ -156,8 +161,8 @@ function updateRisk(value) {
   return sendMessage(`Risk per paper trade set to ${CFG.riskPct}%.`);
 }
 
-async function tradeLoop() {
-  if (!tradingEnabled) return;
+async function tradeLoop(notifyNoTrade = false) {
+  if (!tradingEnabled && !notifyNoTrade) return;
   try {
     const account = await fetchAccount();
     const equity = Number(account.equity || account.portfolio_value || 0);
@@ -170,29 +175,81 @@ async function tradeLoop() {
     }
 
     const open = await fetchPositions();
-    if (open.length >= CFG.maxPositions) return;
+    if (open.length >= CFG.maxPositions) {
+      if (notifyNoTrade) await sendMessage(`Risk guard: max open positions reached (${open.length}/${CFG.maxPositions}).`);
+      return;
+    }
 
     const snapshots = await fetchSnapshots(CFG.watchlist);
+    const summary = { scanned: 0, warmup: 0, hold: 0, blocked: 0, noPrice: 0, submitted: 0 };
     for (const symbol of CFG.watchlist) {
-      if ((await fetchPositions()).length >= CFG.maxPositions) break;
-      if (open.some(p => p.symbol === symbol)) continue;
-      if ((cooldowns.get(symbol) || 0) > Date.now()) continue;
+      summary.scanned++;
+      const currentPositions = await fetchPositions();
+      if (currentPositions.length >= CFG.maxPositions) break;
+      if (currentPositions.some(p => p.symbol === symbol)) { summary.blocked++; continue; }
+      if ((cooldowns.get(symbol) || 0) > Date.now()) { summary.blocked++; continue; }
       const price = snapshotPrice(snapshots[symbol]);
-      if (!price) continue;
+      if (!price) { summary.noPrice++; continue; }
       pushHistory(symbol, price);
       const signal = getSignal(symbol);
-      if (signal !== "BUY") continue;
+      if (signal === "WARMUP") { summary.warmup++; continue; }
+      if (signal !== "BUY") { summary.hold++; continue; }
+      if (!tradingEnabled) { summary.blocked++; continue; }
       const qty = positionSize(equity, price);
-      if (qty < 1) continue;
+      if (qty < 1) { summary.blocked++; continue; }
       const order = await submitBracketBuy(symbol, qty, price);
       lastTradeAt = Date.now();
       cooldowns.set(symbol, Date.now() + CFG.tradeMs * 3);
+      summary.submitted++;
       await sendMessage(`Paper BUY submitted: ${symbol}\nQty: ${qty}\nEntry ref: ${money(price)}\nStop: ${money(price * (1 - CFG.stopPct / 100))}\nTarget: ${money(price * (1 + CFG.takeProfitPct / 100))}\nOrder: ${order.id || "submitted"}`);
+    }
+    if (notifyNoTrade && summary.submitted === 0) {
+      await sendMessage([
+        tradingEnabled ? "Scan complete. No paper orders opened." : "Scan complete. Auto-trading is OFF, so no paper orders were opened.",
+        `Scanned: ${summary.scanned}`,
+        `Warmup: ${summary.warmup}`,
+        `Hold: ${summary.hold}`,
+        `Blocked: ${summary.blocked}`,
+        `No price: ${summary.noPrice}`
+      ].join("\n"));
     }
   } catch (err) {
     console.error("Trade loop failed:", err.message);
     await sendMessage(`Trade loop warning: ${err.message}`);
   }
+}
+
+async function manualPaperBuy(rawSymbol) {
+  const symbol = normalizeSymbol(rawSymbol);
+  if (!symbol) return sendMessage("Usage: /paper_buy AAPL");
+  const account = await fetchAccount();
+  const equity = Number(account.equity || account.portfolio_value || 0);
+  const dailyLoss = Number(account.equity || 0) - Number(account.last_equity || account.equity || 0);
+  const maxDailyLoss = equity * CFG.maxDailyLossPct / 100;
+  if (dailyLoss <= -maxDailyLoss) {
+    tradingEnabled = false;
+    return sendMessage(`Risk guard blocked ${symbol}: daily loss limit hit (${money(dailyLoss)}).`);
+  }
+
+  const open = await fetchPositions();
+  if (open.length >= CFG.maxPositions) return sendMessage(`Risk guard blocked ${symbol}: max positions reached (${open.length}/${CFG.maxPositions}).`);
+  if (open.some(p => p.symbol === symbol)) return sendMessage(`Risk guard blocked ${symbol}: position already open.`);
+  if ((cooldowns.get(symbol) || 0) > Date.now()) return sendMessage(`Risk guard blocked ${symbol}: cooldown is active.`);
+
+  const snapshots = await fetchSnapshots([symbol]);
+  const price = snapshotPrice(snapshots[symbol]);
+  if (!price) return sendMessage(`Could not get an Alpaca paper market price for ${symbol}. This bot currently supports Alpaca stock/ETF symbols.`);
+  const qty = positionSize(equity, price);
+  if (qty < 1) return sendMessage(`Risk sizing blocked ${symbol}: account equity/risk settings produce quantity below 1 share.`);
+
+  const order = await submitBracketBuy(symbol, qty, price);
+  lastTradeAt = Date.now();
+  cooldowns.set(symbol, Date.now() + CFG.tradeMs * 3);
+  return sendMessage(`Manual paper BUY submitted: ${symbol}\nQty: ${qty}\nEntry ref: ${money(price)}\nStop: ${money(price * (1 - CFG.stopPct / 100))}\nTarget: ${money(price * (1 + CFG.takeProfitPct / 100))}\nOrder: ${order.id || "submitted"}`);
+}
+
+function normalizeSymbol(value) {
+  return String(value || "").toUpperCase().replace(/[^A-Z.]/g, "").slice(0, 12);
 }
 
 function pushHistory(symbol, price) {

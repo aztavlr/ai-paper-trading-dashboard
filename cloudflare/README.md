@@ -83,12 +83,15 @@ Then message your Telegram bot:
 /test
 /status
 /start_trading
+/scan_now
 ```
 
 ## Commands
 
-- `/start_trading`
-- `/stop_trading`
+- `/start_trading` or `/auto_on` - start paper auto-trading and scan immediately
+- `/stop_trading` or `/auto_off` - stop opening new paper trades
+- `/scan_now` - scan the watchlist right now
+- `/paper_buy AAPL` - manually open a risk-sized paper bracket buy
 - `/status`
 - `/positions`
 - `/close_all`
@@ -99,6 +102,14 @@ Then message your Telegram bot:
 ## Important
 
 This is still an educational paper-trading bot. It is not guaranteed to be profitable. It opens Alpaca paper bracket buy orders only.
+
+Automation works like this:
+
+1. You send `/start_trading` or `/auto_on` in Telegram.
+2. The Worker scans immediately, then every 5 minutes through Cloudflare Cron.
+3. If the simple RSI/SMA rule says `BUY`, the bot submits an Alpaca Paper bracket buy with stop loss and take profit.
+4. Risk guards block new orders when max daily loss, max positions, duplicate positions, cooldowns, or invalid sizing applies.
+5. You can stop new orders with `/stop_trading` or close paper positions with `/close_all`.
 
 ## Privacy Model
 

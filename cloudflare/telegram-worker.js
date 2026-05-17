@@ -24,29 +24,41 @@ export default {
       return new Response("ok");
     }
 
-    await handleCommand(env, msg.text.trim());
+    try {
+      await handleCommand(env, msg.text.trim());
+    } catch (error) {
+      await handleBotError(env, error);
+    }
     return new Response("ok");
   },
 
   async scheduled(_event, env, ctx) {
-    ctx.waitUntil(tradeLoop(env));
+    ctx.waitUntil(tradeLoop(env).catch(error => handleBotError(env, error)));
   }
 };
+
+async function handleBotError(env, error) {
+  await logEvent(env, "bot_error", { message: error.message });
+  await sendMessage(env, `Bot warning: ${error.message}`);
+}
 
 async function handleCommand(env, text) {
   const [raw, ...rest] = text.split(/\s+/);
   const cmd = raw.toLowerCase();
   if (cmd === "/start" || cmd === "/help") return sendMessage(env, helpText());
-  if (cmd === "/start_trading" || cmd === "/starttrading") {
+  if (cmd === "/start_trading" || cmd === "/starttrading" || cmd === "/auto_on") {
     await statePut(env, "RUNNING", "true");
     await logEvent(env, "command", { command: "start_trading" });
-    return sendMessage(env, "Paper auto-trading is ON. Cloudflare will check the watchlist on the schedule.");
+    await sendMessage(env, "Paper auto-trading is ON. Cloudflare will check the watchlist every 5 minutes.");
+    return tradeLoop(env, true);
   }
-  if (cmd === "/stop_trading" || cmd === "/stoptrading") {
+  if (cmd === "/stop_trading" || cmd === "/stoptrading" || cmd === "/auto_off") {
     await statePut(env, "RUNNING", "false");
     await logEvent(env, "command", { command: "stop_trading" });
     return sendMessage(env, "Paper auto-trading is OFF. Existing paper positions are left alone. Use /close_all to close them.");
   }
+  if (cmd === "/scan_now") return tradeLoop(env, true);
+  if (cmd === "/paper_buy" || cmd === "/buy") return manualPaperBuy(env, rest[0]);
   if (cmd === "/status") return sendMessage(env, await statusText(env));
   if (cmd === "/positions") return sendMessage(env, await positionsText(env));
   if (cmd === "/close_all") return closeAllPositions(env);
@@ -62,8 +74,10 @@ async function handleCommand(env, text) {
 function helpText() {
   return [
     "Commands:",
-    "/start_trading - turn paper auto-trading on",
-    "/stop_trading - stop opening new paper trades",
+    "/start_trading or /auto_on - turn paper auto-trading on",
+    "/stop_trading or /auto_off - stop opening new paper trades",
+    "/scan_now - check the watchlist right now",
+    "/paper_buy AAPL - manually open a risk-sized paper bracket buy",
     "/status - show bot/account status",
     "/positions - list open paper positions",
     "/close_all - close all open paper positions",
@@ -108,8 +122,9 @@ async function updateRisk(env, value) {
   return sendMessage(env, `Risk per paper trade set to ${n}%.`);
 }
 
-async function tradeLoop(env) {
-  if ((await stateGet(env, "RUNNING")) !== "true") return;
+async function tradeLoop(env, notifyNoTrade = false) {
+  const running = (await stateGet(env, "RUNNING")) === "true";
+  if (!running && !notifyNoTrade) return;
   const risk = await getRisk(env);
   const account = await fetchAccount(env);
   const equity = Number(account.equity || account.portfolio_value || 0);
@@ -122,24 +137,33 @@ async function tradeLoop(env) {
   }
 
   const open = await fetchPositions(env);
-  if (open.length >= risk.maxPositions) return;
+  if (open.length >= risk.maxPositions) {
+    if (notifyNoTrade) await sendMessage(env, `Risk guard: max open positions reached (${open.length}/${risk.maxPositions}).`);
+    return;
+  }
 
   const watchlist = await getWatchlist(env);
   const snapshots = await fetchSnapshots(env, watchlist);
+  const summary = { scanned: 0, warmup: 0, hold: 0, blocked: 0, noPrice: 0, submitted: 0 };
   for (const symbol of watchlist) {
+    summary.scanned++;
     const currentPositions = await fetchPositions(env);
     if (currentPositions.length >= risk.maxPositions) break;
-    if (currentPositions.some(p => p.symbol === symbol)) continue;
-    if (Number(await stateGet(env, `COOLDOWN:${symbol}`) || 0) > Date.now()) continue;
+    if (currentPositions.some(p => p.symbol === symbol)) { summary.blocked++; continue; }
+    if (Number(await stateGet(env, `COOLDOWN:${symbol}`) || 0) > Date.now()) { summary.blocked++; continue; }
 
     const price = snapshotPrice(snapshots[symbol]);
-    if (!price) continue;
+    if (!price) { summary.noPrice++; continue; }
     const history = await pushHistory(env, symbol, price);
-    if (getSignal(history) !== "BUY") continue;
+    const signal = getSignal(history);
+    if (signal === "WARMUP") { summary.warmup++; continue; }
+    if (signal !== "BUY") { summary.hold++; continue; }
+    if (!running) { summary.blocked++; continue; }
 
     const qty = positionSize(equity, price, risk);
-    if (qty < 1) continue;
+    if (qty < 1) { summary.blocked++; continue; }
     const order = await submitBracketBuy(env, symbol, qty, price, risk);
+    summary.submitted++;
     await statePut(env, `COOLDOWN:${symbol}`, String(Date.now() + 180000));
     await logEvent(env, "paper_order", {
       side: "buy",
@@ -151,6 +175,58 @@ async function tradeLoop(env) {
     }, symbol);
     await sendMessage(env, `Paper BUY submitted: ${symbol}\nQty: ${qty}\nEntry ref: ${money(price)}\nStop: ${money(price * (1 - risk.stopPct / 100))}\nTarget: ${money(price * (1 + risk.takeProfitPct / 100))}\nOrder: ${order.id || "submitted"}`);
   }
+  await logEvent(env, "scan", summary);
+  if (notifyNoTrade && summary.submitted === 0) {
+    await sendMessage(env, [
+      running ? "Scan complete. No paper orders opened." : "Scan complete. Auto-trading is OFF, so no paper orders were opened.",
+      `Scanned: ${summary.scanned}`,
+      `Warmup: ${summary.warmup}`,
+      `Hold: ${summary.hold}`,
+      `Blocked: ${summary.blocked}`,
+      `No price: ${summary.noPrice}`
+    ].join("\n"));
+  }
+}
+
+async function manualPaperBuy(env, rawSymbol) {
+  const symbol = normalizeSymbol(rawSymbol);
+  if (!symbol) return sendMessage(env, "Usage: /paper_buy AAPL");
+  const risk = await getRisk(env);
+  const account = await fetchAccount(env);
+  const equity = Number(account.equity || account.portfolio_value || 0);
+  const dailyLoss = Number(account.equity || 0) - Number(account.last_equity || account.equity || 0);
+  if (dailyLoss <= -(equity * risk.maxDailyLossPct / 100)) {
+    await statePut(env, "RUNNING", "false");
+    await logEvent(env, "risk_guard", { reason: "daily_loss", dailyLoss, equity, maxDailyLossPct: risk.maxDailyLossPct }, symbol);
+    return sendMessage(env, `Risk guard blocked ${symbol}: daily loss limit hit (${money(dailyLoss)}).`);
+  }
+
+  const open = await fetchPositions(env);
+  if (open.length >= risk.maxPositions) return sendMessage(env, `Risk guard blocked ${symbol}: max positions reached (${open.length}/${risk.maxPositions}).`);
+  if (open.some(p => p.symbol === symbol)) return sendMessage(env, `Risk guard blocked ${symbol}: position already open.`);
+  if (Number(await stateGet(env, `COOLDOWN:${symbol}`) || 0) > Date.now()) return sendMessage(env, `Risk guard blocked ${symbol}: cooldown is active.`);
+
+  const snapshots = await fetchSnapshots(env, [symbol]);
+  const price = snapshotPrice(snapshots[symbol]);
+  if (!price) return sendMessage(env, `Could not get an Alpaca paper market price for ${symbol}. This bot currently supports Alpaca stock/ETF symbols.`);
+  const qty = positionSize(equity, price, risk);
+  if (qty < 1) return sendMessage(env, `Risk sizing blocked ${symbol}: account equity/risk settings produce quantity below 1 share.`);
+
+  const order = await submitBracketBuy(env, symbol, qty, price, risk);
+  await statePut(env, `COOLDOWN:${symbol}`, String(Date.now() + 180000));
+  await logEvent(env, "manual_paper_order", {
+    side: "buy",
+    qty,
+    entryReference: price,
+    stop: roundPrice(price * (1 - risk.stopPct / 100)),
+    target: roundPrice(price * (1 + risk.takeProfitPct / 100)),
+    orderId: order.id || null
+  }, symbol);
+  return sendMessage(env, `Manual paper BUY submitted: ${symbol}\nQty: ${qty}\nEntry ref: ${money(price)}\nStop: ${money(price * (1 - risk.stopPct / 100))}\nTarget: ${money(price * (1 + risk.takeProfitPct / 100))}\nOrder: ${order.id || "submitted"}`);
+}
+
+function normalizeSymbol(value) {
+  return String(value || "").toUpperCase().replace(/[^A-Z.]/g, "").slice(0, 12);
 }
 
 async function pushHistory(env, symbol, price) {

@@ -32,8 +32,10 @@ Keep that terminal open. If it closes, the bot stops listening.
 
 ## Telegram Commands
 
-- `/start_trading` - start paper auto-trading
-- `/stop_trading` - stop opening new paper trades
+- `/start_trading` or `/auto_on` - start paper auto-trading and scan immediately
+- `/stop_trading` or `/auto_off` - stop opening new paper trades
+- `/scan_now` - scan the watchlist right now
+- `/paper_buy AAPL` - manually open a risk-sized paper bracket buy
 - `/status` - show bot/account status
 - `/positions` - list open paper positions
 - `/close_all` - close all open paper positions and stop trading
@@ -44,5 +46,7 @@ Keep that terminal open. If it closes, the bot stops listening.
 ## Safety
 
 This bot opens paper bracket buy orders only. It uses a simple educational RSI/SMA signal and should not be treated as a profitable trading system.
+
+Automation starts only after you send `/start_trading` or `/auto_on` in Telegram. It checks the watchlist on the configured interval and applies max daily loss, max open positions, duplicate-position, cooldown, stop-loss, and take-profit rules.
 
 Do not commit `bot/.env`.
