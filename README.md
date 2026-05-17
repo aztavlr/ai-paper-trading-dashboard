@@ -21,6 +21,7 @@ Open `index.html` in a browser.
 - Telegram signal and trade alerts
 - Optional Anthropic-powered educational AI chat
 - Optional always-on Telegram command bot in `bot/`
+- Optional free Cloudflare Worker deployment in `cloudflare/`
 
 ## Safety Note
 
@@ -39,3 +40,7 @@ See `PRIVACY.md` for details.
 The GitHub Pages website cannot listen to Telegram after the browser tab closes. For start/stop commands without the website open, run the separate Node bot in `bot/`.
 
 See `bot/README.md`.
+
+For a free no-PC deployment, use the Cloudflare Worker version in `cloudflare/`. It uses Telegram webhooks plus scheduled Cloudflare cron checks, so it does not run on your computer.
+
+See `cloudflare/README.md`.

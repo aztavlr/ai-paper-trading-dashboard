@@ -31,3 +31,5 @@ Do not commit API keys, bot tokens, account numbers, secrets, screenshots contai
 ## Telegram Command Bot
 
 The optional always-on Telegram command bot uses `bot/.env` for secrets. That file is ignored by Git and should stay only on the trusted device or server running the bot.
+
+The optional Cloudflare Worker deployment stores secrets in Cloudflare Worker Secrets and state in Cloudflare KV. Do not put real secrets in `cloudflare/wrangler.toml` or commit them to GitHub.

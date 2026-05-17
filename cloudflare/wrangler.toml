@@ -1,0 +1,19 @@
+name = "ai-paper-trading-telegram-bot"
+main = "telegram-worker.js"
+compatibility_date = "2026-05-17"
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[[kv_namespaces]]
+binding = "STATE"
+id = "replace_with_cloudflare_kv_namespace_id"
+
+[secrets]
+required = [
+  "TELEGRAM_BOT_TOKEN",
+  "TELEGRAM_ALLOWED_CHAT_ID",
+  "TELEGRAM_WEBHOOK_SECRET",
+  "ALPACA_API_KEY_ID",
+  "ALPACA_API_SECRET_KEY"
+]
