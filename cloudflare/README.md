@@ -2,22 +2,32 @@
 
 This version runs on Cloudflare Workers, so it does not use your PC/laptop after deployment.
 
-Cloudflare Workers Free includes enough requests for a small private Telegram command bot, cron triggers, and encrypted secrets. The worker uses:
+Cloudflare Workers Free includes enough requests for a small private Telegram command bot, cron triggers, and encrypted secrets. Supabase Free is used as the private backend for bot state and event history. The worker uses:
 
 - Telegram webhook for commands
 - Cloudflare Cron every 5 minutes for paper-trading checks
-- Cloudflare KV for bot state
+- Supabase for bot state and event logs
 - Alpaca Paper Trading API only
 
 ## What You Need
 
 - Free Cloudflare account
+- Free Supabase account
 - Node.js installed locally for deployment
 - Your Telegram bot token
 - Your Telegram chat ID
 - Alpaca Paper API key and secret
 
-## Setup
+## Supabase Setup
+
+1. Create a Supabase project.
+2. Open Supabase **SQL Editor**.
+3. Run the SQL in `../supabase/schema.sql`.
+4. Copy your Supabase Project URL and `service_role` key from **Project Settings > API**.
+
+Keep the `service_role` key private. It goes only into Cloudflare Worker secrets, never into GitHub Pages or browser code.
+
+## Cloudflare Setup
 
 From the repo root:
 
@@ -28,20 +38,6 @@ npm install -g wrangler
 wrangler login
 ```
 
-Create a free KV namespace:
-
-```powershell
-wrangler kv namespace create STATE
-```
-
-Copy the printed `id` into `cloudflare/wrangler.toml`:
-
-```toml
-[[kv_namespaces]]
-binding = "STATE"
-id = "paste_id_here"
-```
-
 Add secrets:
 
 ```powershell
@@ -50,6 +46,9 @@ wrangler secret put TELEGRAM_ALLOWED_CHAT_ID
 wrangler secret put TELEGRAM_WEBHOOK_SECRET
 wrangler secret put ALPACA_API_KEY_ID
 wrangler secret put ALPACA_API_SECRET_KEY
+wrangler secret put SUPABASE_URL
+wrangler secret put SUPABASE_SERVICE_ROLE_KEY
+wrangler secret put BOT_OWNER_ID
 ```
 
 Use a random secret for `TELEGRAM_WEBHOOK_SECRET`, for example:
@@ -101,3 +100,10 @@ Then message your Telegram bot:
 ## Important
 
 This is still an educational paper-trading bot. It is not guaranteed to be profitable. It opens Alpaca paper bracket buy orders only.
+
+## Privacy Model
+
+- Public GitHub Pages site: can be used by visitors, but should not contain private API keys.
+- Cloudflare Worker: private command and automation layer, protected by a secret webhook URL and your allowed Telegram chat id.
+- Supabase: private bot state and event database. Row Level Security is enabled and no public read/write policies are created.
+- Alpaca and Telegram secrets: stored as encrypted Cloudflare Worker secrets only.

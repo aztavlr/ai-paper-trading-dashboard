@@ -22,6 +22,7 @@ Open `index.html` in a browser.
 - Optional Anthropic-powered educational AI chat
 - Optional always-on Telegram command bot in `bot/`
 - Optional free Cloudflare Worker deployment in `cloudflare/`
+- Optional Supabase backend schema in `supabase/`
 
 ## Safety Note
 
@@ -41,6 +42,6 @@ The GitHub Pages website cannot listen to Telegram after the browser tab closes.
 
 See `bot/README.md`.
 
-For a free no-PC deployment, use the Cloudflare Worker version in `cloudflare/`. It uses Telegram webhooks plus scheduled Cloudflare cron checks, so it does not run on your computer.
+For a free no-PC deployment, use the Cloudflare Worker version in `cloudflare/`. It uses Telegram webhooks plus scheduled Cloudflare cron checks, so it does not run on your computer. The Worker can use Supabase as a private backend for bot state and event logs.
 
 See `cloudflare/README.md`.

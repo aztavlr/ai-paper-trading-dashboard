@@ -38,11 +38,13 @@ async function handleCommand(env, text) {
   const cmd = raw.toLowerCase();
   if (cmd === "/start" || cmd === "/help") return sendMessage(env, helpText());
   if (cmd === "/start_trading" || cmd === "/starttrading") {
-    await env.STATE.put("RUNNING", "true");
+    await statePut(env, "RUNNING", "true");
+    await logEvent(env, "command", { command: "start_trading" });
     return sendMessage(env, "Paper auto-trading is ON. Cloudflare will check the watchlist on the schedule.");
   }
   if (cmd === "/stop_trading" || cmd === "/stoptrading") {
-    await env.STATE.put("RUNNING", "false");
+    await statePut(env, "RUNNING", "false");
+    await logEvent(env, "command", { command: "stop_trading" });
     return sendMessage(env, "Paper auto-trading is OFF. Existing paper positions are left alone. Use /close_all to close them.");
   }
   if (cmd === "/status") return sendMessage(env, await statusText(env));
@@ -72,7 +74,8 @@ function helpText() {
 }
 
 async function getSetting(env, key) {
-  return (await env.STATE.get(key)) || DEFAULTS[key] || "";
+  const value = await stateGet(env, key);
+  return value == null ? DEFAULTS[key] || "" : String(value);
 }
 
 async function getWatchlist(env) {
@@ -92,25 +95,28 @@ async function getRisk(env) {
 async function updateWatchlist(env, symbols) {
   const next = symbols.map(s => s.toUpperCase().replace(/[^A-Z.]/g, "")).filter(Boolean).slice(0, 12);
   if (!next.length) return sendMessage(env, `Current watchlist: ${(await getWatchlist(env)).join(", ")}`);
-  await env.STATE.put("WATCHLIST", next.join(","));
+  await statePut(env, "WATCHLIST", next.join(","));
+  await logEvent(env, "settings_update", { key: "WATCHLIST", value: next });
   return sendMessage(env, `Watchlist updated: ${next.join(", ")}`);
 }
 
 async function updateRisk(env, value) {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0 || n > 5) return sendMessage(env, "Use /risk with a value from 0.1 to 5. Example: /risk 1");
-  await env.STATE.put("RISK_PER_TRADE_PCT", String(n));
+  await statePut(env, "RISK_PER_TRADE_PCT", String(n));
+  await logEvent(env, "settings_update", { key: "RISK_PER_TRADE_PCT", value: n });
   return sendMessage(env, `Risk per paper trade set to ${n}%.`);
 }
 
 async function tradeLoop(env) {
-  if ((await env.STATE.get("RUNNING")) !== "true") return;
+  if ((await stateGet(env, "RUNNING")) !== "true") return;
   const risk = await getRisk(env);
   const account = await fetchAccount(env);
   const equity = Number(account.equity || account.portfolio_value || 0);
   const dailyLoss = Number(account.equity || 0) - Number(account.last_equity || account.equity || 0);
   if (dailyLoss <= -(equity * risk.maxDailyLossPct / 100)) {
-    await env.STATE.put("RUNNING", "false");
+    await statePut(env, "RUNNING", "false");
+    await logEvent(env, "risk_guard", { reason: "daily_loss", dailyLoss, equity, maxDailyLossPct: risk.maxDailyLossPct });
     await sendMessage(env, `Daily loss guard triggered (${money(dailyLoss)}). Auto-trading stopped.`);
     return;
   }
@@ -124,7 +130,7 @@ async function tradeLoop(env) {
     const currentPositions = await fetchPositions(env);
     if (currentPositions.length >= risk.maxPositions) break;
     if (currentPositions.some(p => p.symbol === symbol)) continue;
-    if (Number(await env.STATE.get(`COOLDOWN:${symbol}`) || 0) > Date.now()) continue;
+    if (Number(await stateGet(env, `COOLDOWN:${symbol}`) || 0) > Date.now()) continue;
 
     const price = snapshotPrice(snapshots[symbol]);
     if (!price) continue;
@@ -134,17 +140,26 @@ async function tradeLoop(env) {
     const qty = positionSize(equity, price, risk);
     if (qty < 1) continue;
     const order = await submitBracketBuy(env, symbol, qty, price, risk);
-    await env.STATE.put(`COOLDOWN:${symbol}`, String(Date.now() + 180000));
+    await statePut(env, `COOLDOWN:${symbol}`, String(Date.now() + 180000));
+    await logEvent(env, "paper_order", {
+      side: "buy",
+      qty,
+      entryReference: price,
+      stop: roundPrice(price * (1 - risk.stopPct / 100)),
+      target: roundPrice(price * (1 + risk.takeProfitPct / 100)),
+      orderId: order.id || null
+    }, symbol);
     await sendMessage(env, `Paper BUY submitted: ${symbol}\nQty: ${qty}\nEntry ref: ${money(price)}\nStop: ${money(price * (1 - risk.stopPct / 100))}\nTarget: ${money(price * (1 + risk.takeProfitPct / 100))}\nOrder: ${order.id || "submitted"}`);
   }
 }
 
 async function pushHistory(env, symbol, price) {
   const key = `HISTORY:${symbol}`;
-  const old = JSON.parse((await env.STATE.get(key)) || "[]");
+  const raw = await stateGet(env, key);
+  const old = Array.isArray(raw) ? raw : JSON.parse(raw || "[]");
   old.push(price);
   while (old.length > 60) old.shift();
-  await env.STATE.put(key, JSON.stringify(old));
+  await statePut(env, key, old);
   return old;
 }
 
@@ -186,7 +201,7 @@ async function statusText(env) {
   const positions = await fetchPositions(env);
   const risk = await getRisk(env);
   return [
-    `Paper auto-trading: ${(await env.STATE.get("RUNNING")) === "true" ? "ON" : "OFF"}`,
+    `Paper auto-trading: ${(await stateGet(env, "RUNNING")) === "true" ? "ON" : "OFF"}`,
     `Equity: ${money(Number(account.equity || 0))}`,
     `Buying power: ${money(Number(account.buying_power || 0))}`,
     `Open positions: ${positions.length}/${risk.maxPositions}`,
@@ -205,7 +220,8 @@ async function closeAllPositions(env) {
   const positions = await fetchPositions(env);
   if (!positions.length) return sendMessage(env, "No open paper positions to close.");
   await alpaca(env, "/v2/positions", { method: "DELETE" });
-  await env.STATE.put("RUNNING", "false");
+  await statePut(env, "RUNNING", "false");
+  await logEvent(env, "command", { command: "close_all", closedPositions: positions.length });
   return sendMessage(env, "Close-all request sent. Auto-trading is now OFF.");
 }
 
@@ -266,6 +282,66 @@ function alpacaHeaders(env) {
     "APCA-API-SECRET-KEY": env.ALPACA_API_SECRET_KEY,
     "content-type": "application/json"
   };
+}
+
+async function stateGet(env, key) {
+  if (hasSupabase(env)) {
+    const owner = encodeURIComponent(ownerId(env));
+    const stateKey = encodeURIComponent(key);
+    const rows = await supabase(env, `/rest/v1/bot_state?owner_id=eq.${owner}&key=eq.${stateKey}&select=value`);
+    return rows?.[0]?.value ?? null;
+  }
+  if (env.STATE) return env.STATE.get(key);
+  throw new Error("No state backend configured. Add Supabase secrets or a STATE KV binding.");
+}
+
+async function statePut(env, key, value) {
+  if (hasSupabase(env)) {
+    await supabase(env, "/rest/v1/bot_state?on_conflict=owner_id,key", {
+      method: "POST",
+      headers: { Prefer: "resolution=merge-duplicates" },
+      body: [{ owner_id: ownerId(env), key, value, updated_at: new Date().toISOString() }]
+    });
+    return;
+  }
+  if (env.STATE) {
+    await env.STATE.put(key, typeof value === "string" ? value : JSON.stringify(value));
+    return;
+  }
+  throw new Error("No state backend configured. Add Supabase secrets or a STATE KV binding.");
+}
+
+async function logEvent(env, type, payload = {}, symbol = null) {
+  if (!hasSupabase(env)) return;
+  try {
+    await supabase(env, "/rest/v1/bot_events", {
+      method: "POST",
+      body: [{ owner_id: ownerId(env), type, symbol, payload }]
+    });
+  } catch (error) {
+    console.warn("Supabase event log failed", error.message);
+  }
+}
+
+async function supabase(env, pathname, options = {}) {
+  const base = String(env.SUPABASE_URL || "").replace(/\/+$/, "");
+  return request(`${base}${pathname}`, {
+    ...options,
+    headers: {
+      apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+      "content-type": "application/json",
+      ...(options.headers || {})
+    }
+  });
+}
+
+function hasSupabase(env) {
+  return Boolean(env.SUPABASE_URL && env.SUPABASE_SERVICE_ROLE_KEY);
+}
+
+function ownerId(env) {
+  return String(env.BOT_OWNER_ID || env.TELEGRAM_ALLOWED_CHAT_ID || "default");
 }
 
 async function sendMessage(env, text, chatId = env.TELEGRAM_ALLOWED_CHAT_ID) {

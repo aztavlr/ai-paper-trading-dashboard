@@ -32,4 +32,4 @@ Do not commit API keys, bot tokens, account numbers, secrets, screenshots contai
 
 The optional always-on Telegram command bot uses `bot/.env` for secrets. That file is ignored by Git and should stay only on the trusted device or server running the bot.
 
-The optional Cloudflare Worker deployment stores secrets in Cloudflare Worker Secrets and state in Cloudflare KV. Do not put real secrets in `cloudflare/wrangler.toml` or commit them to GitHub.
+The optional Cloudflare Worker deployment stores secrets in Cloudflare Worker Secrets and stores bot state/event logs in Supabase. The Supabase service-role key must stay only in Cloudflare Worker Secrets. Do not put real secrets in `cloudflare/wrangler.toml`, GitHub Pages, browser code, screenshots, or commits.
