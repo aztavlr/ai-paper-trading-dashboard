@@ -37,6 +37,17 @@ npm create cloudflare@latest -- --help
 npx.cmd wrangler login
 ```
 
+### Easiest Windows Setup
+
+Run the guided setup script and paste each value when it asks:
+
+```powershell
+cd "C:\Users\Danny\Documents\Codex\2026-05-17\files-mentioned-by-the-user-telegram\cloudflare"
+powershell -ExecutionPolicy Bypass -File .\setup-cloudflare-bot.ps1
+```
+
+The script saves secrets to Cloudflare, deploys the Worker, and sets the Telegram webhook.
+
 Add secrets:
 
 ```powershell
