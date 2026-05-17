@@ -27,6 +27,7 @@ If Cloudflare asks for Python Worker tooling, follow Cloudflare's Python Worker 
 - `/auto_off` or `/stop_trading`
 - `/scan_now`
 - `/paper_buy AAPL`
+- `/paper_buy BTC/USD`
 - `/force_buy AAPL`
 - `/explain AAPL`
 - `/ai AAPL`
@@ -38,7 +39,10 @@ If Cloudflare asks for Python Worker tooling, follow Cloudflare's Python Worker 
 - `/close_all`
 - `/cancel_orders`
 - `/watch AAPL TSLA SPY`
+- `/watch AAPL BTC/USD ETH/USD`
 - `/risk 1`
+- `/set leverage 2`
+- `/crypto_on` or `/crypto_off`
 - `/test`
 
 ## Smarter Signal Engine
@@ -56,6 +60,21 @@ The Python Worker uses:
 - Market-open guard so automation does not queue surprise next-session orders
 - Safer `/paper_buy` behavior; use `/force_buy` only for intentional paper tests
 - Daily loss baseline stored in Supabase
+- Alpaca crypto market data from `v1beta3/crypto`
+- Alpaca crypto spot paper orders using `BTC/USD` style symbols
+- Managed crypto exits for stop/target checks on scheduled scans
+- Paper-only leverage simulation for crypto risk sizing and liquidation guard
+
+## Crypto And Leverage
+
+Alpaca crypto is spot trading. Alpaca's docs say crypto orders cannot use leverage and are evaluated against `non_marginable_buying_power`.
+
+This Worker therefore does two separate things:
+
+- Sends Alpaca paper crypto spot orders for supported pairs like `BTC/USD` and `ETH/USD`.
+- Simulates leverage in the bot's own risk model for education with `/set leverage 2`.
+
+The simulated leverage is not real exchange leverage, does not borrow funds, and should not be treated like a live futures bot.
 
 ## Free Built-In Review
 

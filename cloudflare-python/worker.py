@@ -10,7 +10,7 @@ from urllib.parse import quote, urlencode, urlparse
 
 
 DEFAULTS = {
-    "WATCHLIST": "AAPL,TSLA,NVDA,MSFT,SPY",
+    "WATCHLIST": "AAPL,TSLA,NVDA,MSFT,SPY,BTC/USD,ETH/USD",
     "RISK_PER_TRADE_PCT": "1",
     "STOP_LOSS_PCT": "2",
     "TAKE_PROFIT_PCT": "4",
@@ -25,6 +25,11 @@ DEFAULTS = {
     "MAX_POSITION_VALUE_PCT": "20",
     "COOLDOWN_MINUTES": "30",
     "MARKET_OPEN_ONLY": "true",
+    "CRYPTO_TRADING_ENABLED": "true",
+    "CRYPTO_LEVERAGE_MODE": "paper",
+    "CRYPTO_LEVERAGE": "2",
+    "MAX_CRYPTO_LEVERAGE": "3",
+    "CRYPTO_LOCATION": "us",
 }
 
 ALPACA_PAPER_API = "https://paper-api.alpaca.markets"
@@ -42,6 +47,22 @@ SETTING_ALIASES = {
     "cooldown": ("COOLDOWN_MINUTES", 1, 1440, " minutes"),
     "atr_stop": ("ATR_STOP_MULTIPLIER", 0.5, 5, "x"),
     "take_profit_r": ("TAKE_PROFIT_R_MULTIPLIER", 0.5, 8, "R"),
+    "leverage": ("CRYPTO_LEVERAGE", 1, 3, "x"),
+    "max_crypto_leverage": ("MAX_CRYPTO_LEVERAGE", 1, 5, "x"),
+}
+
+CRYPTO_ALIASES = {
+    "BTC": "BTC/USD",
+    "XBT": "BTC/USD",
+    "ETH": "ETH/USD",
+    "SOL": "SOL/USD",
+    "LTC": "LTC/USD",
+    "BCH": "BCH/USD",
+    "DOGE": "DOGE/USD",
+    "AVAX": "AVAX/USD",
+    "LINK": "LINK/USD",
+    "UNI": "UNI/USD",
+    "AAVE": "AAVE/USD",
 }
 
 
@@ -101,7 +122,18 @@ def round_price(value):
 
 
 def normalize_symbol(value):
-    return re.sub(r"[^A-Z.]", "", str(value or "").upper())[:12]
+    raw = str(value or "").upper().replace("-", "/").strip()
+    raw = CRYPTO_ALIASES.get(raw, raw)
+    cleaned = re.sub(r"[^A-Z0-9/._]", "", raw)
+    if "/" not in cleaned and cleaned.endswith("USD") and len(cleaned) > 3:
+        base = cleaned[:-3]
+        if base in CRYPTO_ALIASES or base in {"BTC", "ETH", "SOL", "LTC", "BCH", "DOGE", "AVAX", "LINK", "UNI", "AAVE"}:
+            cleaned = f"{base}/USD"
+    return cleaned[:16]
+
+
+def is_crypto_symbol(symbol):
+    return "/" in str(symbol or "")
 
 
 async def send_message(env, text, chat_id=None):
@@ -210,6 +242,7 @@ async def get_watchlist(env):
 
 
 async def get_risk(env):
+    max_crypto_leverage = clamp_float(await get_setting(env, "MAX_CRYPTO_LEVERAGE"), 3, 1, 5)
     return {
         "risk_pct": clamp_float(await get_setting(env, "RISK_PER_TRADE_PCT"), 1, 0.1, 5),
         "stop_pct": clamp_float(await get_setting(env, "STOP_LOSS_PCT"), 2, 0.25, 15),
@@ -225,6 +258,11 @@ async def get_risk(env):
         "max_position_value_pct": clamp_float(await get_setting(env, "MAX_POSITION_VALUE_PCT"), 20, 1, 100),
         "cooldown_minutes": clamp_float(await get_setting(env, "COOLDOWN_MINUTES"), 30, 1, 1440),
         "market_open_only": as_bool(await get_setting(env, "MARKET_OPEN_ONLY")),
+        "crypto_enabled": as_bool(await get_setting(env, "CRYPTO_TRADING_ENABLED")),
+        "crypto_leverage_mode": str(await get_setting(env, "CRYPTO_LEVERAGE_MODE")).lower(),
+        "crypto_leverage": clamp_float(await get_setting(env, "CRYPTO_LEVERAGE"), 2, 1, max_crypto_leverage),
+        "max_crypto_leverage": max_crypto_leverage,
+        "crypto_location": await get_setting(env, "CRYPTO_LOCATION"),
     }
 
 
@@ -251,8 +289,13 @@ async def fetch_clock(env):
 
 
 async def fetch_bars(env, symbol, timeframe="5Min", limit=160):
-    qs = urlencode({"symbols": symbol, "timeframe": timeframe, "limit": str(limit), "feed": "iex", "adjustment": "raw"})
-    data = await alpaca_data(env, f"/v2/stocks/bars?{qs}")
+    if is_crypto_symbol(symbol):
+        loc = await get_setting(env, "CRYPTO_LOCATION")
+        qs = urlencode({"symbols": symbol, "timeframe": timeframe, "limit": str(limit)})
+        data = await alpaca_data(env, f"/v1beta3/crypto/{loc}/bars?{qs}")
+    else:
+        qs = urlencode({"symbols": symbol, "timeframe": timeframe, "limit": str(limit), "feed": "iex", "adjustment": "raw"})
+        data = await alpaca_data(env, f"/v2/stocks/bars?{qs}")
     rows = data.get("bars", {}).get(symbol, [])
     bars = []
     for row in rows:
@@ -479,17 +522,20 @@ async def analyze_symbol(env, symbol, risk):
     return analysis
 
 
-def position_size(equity, price, risk, stop_price=None, buying_power=None):
+def position_size(equity, price, risk, stop_price=None, buying_power=None, symbol=None):
     if price <= 0:
         return 0
     risk_dollars = equity * risk["risk_pct"] / 100
     risk_per_share = abs(price - stop_price) if stop_price else price * risk["stop_pct"] / 100
-    risk_qty = math.floor(risk_dollars / max(risk_per_share, 0.01))
-    max_value_qty = math.floor((equity * risk["max_position_value_pct"] / 100) / price)
+    exposure_multiplier = risk["crypto_leverage"] if is_crypto_symbol(symbol) and risk["crypto_leverage_mode"] == "paper" else 1
+    risk_qty = risk_dollars / max(risk_per_share * exposure_multiplier, 0.01)
+    max_notional = equity * risk["max_position_value_pct"] / 100 * exposure_multiplier
+    max_value_qty = max_notional / price
     caps = [risk_qty, max_value_qty]
     if buying_power is not None:
-        caps.append(math.floor((float(buying_power) * 0.95) / price))
-    return max(0, min(caps))
+        caps.append((float(buying_power) * 0.95 * exposure_multiplier) / price)
+    qty = max(0, min(caps))
+    return round(qty, 8) if is_crypto_symbol(symbol) else math.floor(qty)
 
 
 def now_ms():
@@ -548,7 +594,9 @@ async def trade_slot_status(env, symbol, risk):
     return True, "", positions, open_orders
 
 
-async def market_is_tradeable(env, risk):
+async def market_is_tradeable(env, risk, symbol=None):
+    if is_crypto_symbol(symbol):
+        return True, "crypto trades 24/7"
     if not risk["market_open_only"]:
         return True, "market-open guard disabled"
     clock = await fetch_clock(env)
@@ -558,7 +606,85 @@ async def market_is_tradeable(env, risk):
     return False, f"market is closed until {next_open}"
 
 
+async def managed_position_key(symbol):
+    return f"MANAGED:{symbol}"
+
+
+async def record_managed_crypto_position(env, symbol, qty, analysis, risk, order_id=None):
+    if not is_crypto_symbol(symbol):
+        return
+    payload = {
+        "symbol": symbol,
+        "qty": qty,
+        "entry_ref": analysis["price"],
+        "stop": analysis["stop"],
+        "target": analysis["target"],
+        "leverage": risk["crypto_leverage"],
+        "mode": risk["crypto_leverage_mode"],
+        "order_id": order_id,
+        "opened_at": now_ms(),
+    }
+    await state_put(env, await managed_position_key(symbol), payload)
+
+
+async def clear_managed_crypto_position(env, symbol):
+    await state_put(env, await managed_position_key(symbol), {"closed": True, "closed_at": now_ms()})
+
+
+async def close_crypto_position(env, symbol, qty, reason):
+    order = await alpaca(env, "/v2/orders", method="POST", body={
+        "symbol": symbol,
+        "qty": str(qty),
+        "side": "sell",
+        "type": "market",
+        "time_in_force": "gtc",
+    })
+    await clear_managed_crypto_position(env, symbol)
+    await log_event(env, "crypto_managed_close", {"symbol": symbol, "qty": qty, "reason": reason, "order_id": order.get("id")}, symbol)
+    return order
+
+
+async def manage_crypto_positions(env):
+    positions = await fetch_positions(env)
+    managed = [p for p in positions if is_crypto_symbol(p.get("symbol"))]
+    for pos in managed:
+        symbol = str(pos.get("symbol") or "").upper()
+        state = await state_get(env, await managed_position_key(symbol))
+        if not isinstance(state, dict) or state.get("closed"):
+            continue
+        qty = float(pos.get("qty") or 0)
+        if qty <= 0:
+            continue
+        bars = await fetch_bars(env, symbol, "1Min", 3)
+        if not bars:
+            continue
+        price = bars[-1]["c"]
+        stop = float(state.get("stop") or 0)
+        target = float(state.get("target") or 0)
+        leverage = float(state.get("leverage") or 1)
+        entry = float(state.get("entry_ref") or price)
+        liquidation_ref = entry * (1 - (0.85 / max(leverage, 1)))
+        reason = None
+        if stop and price <= stop:
+            reason = "crypto stop hit"
+        elif target and price >= target:
+            reason = "crypto target hit"
+        elif leverage > 1 and price <= liquidation_ref:
+            reason = "paper leverage liquidation guard"
+        if reason:
+            await close_crypto_position(env, symbol, qty, reason)
+            await safe_send_message(env, f"{reason.upper()}: closed {symbol}\nQty: {qty}\nPrice ref: {money(price)}\nStop: {money(stop)} | Target: {money(target)}\nLeverage mode: paper {leverage}x")
+
+
 async def submit_bracket_buy(env, symbol, qty, analysis):
+    if is_crypto_symbol(symbol):
+        return await alpaca(env, "/v2/orders", method="POST", body={
+            "symbol": symbol,
+            "qty": str(qty),
+            "side": "buy",
+            "type": "market",
+            "time_in_force": "gtc",
+        })
     return await alpaca(env, "/v2/orders", method="POST", body={
         "symbol": symbol,
         "qty": str(qty),
@@ -583,6 +709,8 @@ def strategy_text(risk):
         f"ATR stop multiplier: {risk['atr_stop_multiplier']}x",
         f"Take profit: {risk['take_profit_r']}R",
         f"Market-open guard: {'ON' if risk['market_open_only'] else 'OFF'}",
+        f"Crypto trading: {'ON' if risk['crypto_enabled'] else 'OFF'}",
+        f"Crypto leverage: {risk['crypto_leverage']}x paper simulation only; Alpaca executes spot orders without leverage.",
         "Reads: EMA trend, higher-timeframe alignment, RSI, MACD, Bollinger position, VWAP, volume, ATR volatility, support/resistance, and candlestick patterns.",
         "Free built-in analyst command: /ai AAPL. No paid AI key required.",
         "Still educational paper trading only. No method is 100% accurate.",
@@ -651,6 +779,7 @@ async def explain_symbol(env, raw_symbol):
     if not analysis["price"]:
         return await send_message(env, f"No candle data available for {symbol}.")
     htf = analysis.get("higher_timeframe") or {}
+    leverage_line = f"Paper leverage: {risk['crypto_leverage']}x simulated" if is_crypto_symbol(symbol) else "Paper leverage: none"
     return await send_message(env, "\n".join([
         f"{symbol} Python Worker readout ({risk['timeframe']})",
         f"Action: {analysis['action']}",
@@ -661,6 +790,7 @@ async def explain_symbol(env, raw_symbol):
         f"Higher TF: {htf.get('trend', htf.get('status', 'unknown'))}",
         f"ATR: {money(analysis['atr'])} | Stop: {money(analysis['stop'])} | Target: {money(analysis['target'])}",
         f"Risk/reward: {analysis.get('rr', 0):.2f}R",
+        leverage_line,
         f"Pattern: {analysis['pattern'] or 'none'}",
         f"Why: {'; '.join(analysis['reasons'])}",
     ]))
@@ -684,13 +814,15 @@ async def manual_paper_buy(env, raw_symbol, force=False):
     if not symbol:
         return await send_message(env, "Usage: /paper_buy AAPL")
     risk = await get_risk(env)
+    if is_crypto_symbol(symbol) and not risk["crypto_enabled"]:
+        return await send_message(env, f"Crypto trading is OFF. Use /crypto_on to enable paper crypto trading.")
     account = await fetch_account(env)
     equity = float(account.get("equity") or account.get("portfolio_value") or 0)
     buying_power = float(account.get("buying_power") or 0)
     daily_blocked, daily_loss, baseline = await daily_loss_guard(env, account, risk)
     if daily_blocked:
         return await send_message(env, f"Risk guard blocked {symbol}: daily loss limit hit ({money(daily_loss)} from {money(baseline)} baseline).")
-    market_ok, market_reason = await market_is_tradeable(env, risk)
+    market_ok, market_reason = await market_is_tradeable(env, risk, symbol)
     if not market_ok:
         return await send_message(env, f"Risk guard blocked {symbol}: {market_reason}.")
     slot_ok, slot_reason, _positions, _orders = await trade_slot_status(env, symbol, risk)
@@ -707,18 +839,21 @@ async def manual_paper_buy(env, raw_symbol, force=False):
             f"Required confidence: {risk['min_confidence']}% | R/R: {analysis.get('rr', 0):.2f}R",
             "Use /explain first, or /force_buy SYMBOL only if you intentionally want a risk-sized paper test.",
         ]))
-    qty = position_size(equity, analysis["price"], risk, analysis.get("stop"), buying_power)
+    qty = position_size(equity, analysis["price"], risk, analysis.get("stop"), buying_power, symbol)
     if qty < 1:
         return await send_message(env, f"Risk sizing blocked {symbol}: quantity below 1 share.")
     order = await submit_bracket_buy(env, symbol, qty, analysis)
+    await record_managed_crypto_position(env, symbol, qty, analysis, risk, order.get("id"))
     await set_cooldown(env, symbol, risk)
     event_type = "force_python_order" if force else "manual_python_order"
     await log_event(env, event_type, {"symbol": symbol, "qty": qty, "analysis": analysis}, symbol)
     force_note = "FORCED paper BUY submitted" if force else "Manual paper BUY submitted"
-    return await send_message(env, f"{force_note}: {symbol}\nConfidence: {analysis['confidence']}%\nQty: {qty}\nEntry ref: {money(analysis['price'])}\nStop: {money(analysis['stop'])}\nTarget: {money(analysis['target'])}\nWhy: {'; '.join(analysis['reasons'][:4])}\nOrder: {order.get('id', 'submitted')}")
+    leverage_note = f"\nCrypto leverage: simulated paper {risk['crypto_leverage']}x (Alpaca executes spot only)" if is_crypto_symbol(symbol) else ""
+    return await send_message(env, f"{force_note}: {symbol}\nConfidence: {analysis['confidence']}%\nQty: {qty}\nEntry ref: {money(analysis['price'])}\nStop: {money(analysis['stop'])}\nTarget: {money(analysis['target'])}{leverage_note}\nWhy: {'; '.join(analysis['reasons'][:4])}\nOrder: {order.get('id', 'submitted')}")
 
 
 async def trade_loop(env, notify=False):
+    await manage_crypto_positions(env)
     running = await state_get(env, "RUNNING") == "true"
     if not running and not notify:
         return
@@ -732,15 +867,16 @@ async def trade_loop(env, notify=False):
         await log_event(env, "risk_guard", {"reason": "daily_loss", "daily_loss": daily_loss, "baseline": baseline})
         await send_message(env, f"Daily loss guard triggered ({money(daily_loss)} from {money(baseline)} baseline). Auto-trading stopped.")
         return
-    market_ok, market_reason = await market_is_tradeable(env, risk)
-    if not market_ok:
-        await log_event(env, "python_scan_blocked", {"reason": "market_closed", "detail": market_reason})
-        if notify:
-            await send_message(env, f"Scan blocked: {market_reason}.")
-        return
     summary = {"scanned": 0, "warmup": 0, "hold": 0, "low": 0, "blocked": 0, "orders": 0}
     for symbol in await get_watchlist(env):
         summary["scanned"] += 1
+        if is_crypto_symbol(symbol) and not risk["crypto_enabled"]:
+            summary["blocked"] += 1
+            continue
+        market_ok, market_reason = await market_is_tradeable(env, risk, symbol)
+        if not market_ok:
+            summary["blocked"] += 1
+            continue
         slot_ok, slot_reason, _positions, _orders = await trade_slot_status(env, symbol, risk)
         if not slot_ok:
             summary["blocked"] += 1
@@ -763,15 +899,17 @@ async def trade_loop(env, notify=False):
         if not running:
             summary["blocked"] += 1
             continue
-        qty = position_size(equity, analysis["price"], risk, analysis["stop"], buying_power)
+        qty = position_size(equity, analysis["price"], risk, analysis["stop"], buying_power, symbol)
         if qty < 1:
             summary["blocked"] += 1
             continue
         order = await submit_bracket_buy(env, symbol, qty, analysis)
+        await record_managed_crypto_position(env, symbol, qty, analysis, risk, order.get("id"))
         summary["orders"] += 1
         await set_cooldown(env, symbol, risk)
         await log_event(env, "python_paper_order", {"symbol": symbol, "qty": qty, "analysis": analysis, "order_id": order.get("id")}, symbol)
-        await send_message(env, f"Paper BUY submitted: {symbol}\nConfidence: {analysis['confidence']}%\nQty: {qty}\nEntry ref: {money(analysis['price'])}\nStop: {money(analysis['stop'])}\nTarget: {money(analysis['target'])}\nWhy: {'; '.join(analysis['reasons'][:4])}\nOrder: {order.get('id', 'submitted')}")
+        leverage_note = f"\nCrypto leverage: simulated paper {risk['crypto_leverage']}x (spot order)" if is_crypto_symbol(symbol) else ""
+        await send_message(env, f"Paper BUY submitted: {symbol}\nConfidence: {analysis['confidence']}%\nQty: {qty}\nEntry ref: {money(analysis['price'])}\nStop: {money(analysis['stop'])}\nTarget: {money(analysis['target'])}{leverage_note}\nWhy: {'; '.join(analysis['reasons'][:4])}\nOrder: {order.get('id', 'submitted')}")
     await log_event(env, "python_scan", summary)
     if notify and summary["orders"] == 0:
         await send_message(env, f"Python scan complete. No paper orders opened.\nScanned: {summary['scanned']}\nWarmup: {summary['warmup']}\nHold: {summary['hold']}\nLow confidence: {summary['low']}\nBlocked: {summary['blocked']}")
@@ -784,7 +922,7 @@ async def status_text(env):
     open_orders = await fetch_open_orders(env)
     daily_blocked, daily_loss, baseline = await daily_loss_guard(env, account, risk)
     try:
-        market_ok, market_reason = await market_is_tradeable(env, risk)
+        market_ok, market_reason = await market_is_tradeable(env, risk, "AAPL")
     except Exception as exc:
         market_ok, market_reason = False, f"market check failed: {exc}"
     return "\n".join([
@@ -794,6 +932,7 @@ async def status_text(env):
         f"Day P&L guard: {money(daily_loss)} vs {risk['max_daily_loss_pct']}% max loss ({'BLOCKED' if daily_blocked else 'ok'})",
         f"Market guard: {'ok' if market_ok else 'blocked'} ({market_reason})",
         f"Open positions/orders: {len(positions)}/{len(open_orders)} of {risk['max_positions']} slots",
+        f"Crypto: {'ON' if risk['crypto_enabled'] else 'OFF'} | leverage simulation: {risk['crypto_leverage']}x paper-only",
         f"Watchlist: {', '.join(await get_watchlist(env))}",
         f"Strategy: {risk['timeframe']} + {risk['higher_timeframe']} confirmation, min confidence {risk['min_confidence']}%",
         f"Cooldown after entries: {risk['cooldown_minutes']:.0f} minutes",
@@ -853,6 +992,11 @@ async def update_risk(env, value):
     return await send_message(env, f"Risk per paper trade set to {risk}%.")
 
 
+async def crypto_toggle(env, enabled):
+    await state_put(env, "CRYPTO_TRADING_ENABLED", "true" if enabled else "false")
+    return await send_message(env, f"Crypto paper trading is now {'ON' if enabled else 'OFF'}.")
+
+
 async def update_setting(env, key, value):
     alias = str(key or "").lower().strip()
     if alias in {"market", "market_guard", "market_open"}:
@@ -861,6 +1005,12 @@ async def update_setting(env, key, value):
         enabled = as_bool(value)
         await state_put(env, "MARKET_OPEN_ONLY", "true" if enabled else "false")
         return await send_message(env, f"Market-open guard set to {'ON' if enabled else 'OFF'}.")
+    if alias in {"crypto", "crypto_trading"}:
+        if str(value).lower() not in {"on", "off", "true", "false", "1", "0"}:
+            return await send_message(env, "Use /set crypto on or /set crypto off")
+        enabled = as_bool(value)
+        await state_put(env, "CRYPTO_TRADING_ENABLED", "true" if enabled else "false")
+        return await send_message(env, f"Crypto paper trading set to {'ON' if enabled else 'OFF'}.")
     if alias in {"timeframe", "tf"}:
         allowed = {"1min": "1Min", "5min": "5Min", "15min": "15Min", "30min": "30Min", "1hour": "1Hour", "1day": "1Day"}
         candidate = allowed.get(str(value or "").strip().lower())
@@ -907,6 +1057,8 @@ async def settings_text(env):
         f"timeframe: {risk['timeframe']}",
         f"higher_timeframe: {risk['higher_timeframe']}",
         f"market_guard: {'on' if risk['market_open_only'] else 'off'}",
+        f"crypto: {'on' if risk['crypto_enabled'] else 'off'}",
+        f"leverage: {risk['crypto_leverage']}x paper-only",
         "Example: /set confidence 78",
     ])
 
@@ -918,12 +1070,15 @@ def help_text():
         "/auto_off or /stop_trading - stop new paper orders",
         "/scan_now - scan now",
         "/paper_buy AAPL - manual risk-sized bracket buy",
+        "/paper_buy BTC/USD - crypto spot paper buy with managed exits",
         "/force_buy AAPL - force a risk-sized paper test",
         "/explain AAPL - explain candle/indicator readout",
         "/ai AAPL - free built-in paper-trading review",
         "/strategy - show strategy settings",
         "/settings - show editable settings",
         "/set confidence 78 - edit a setting",
+        "/set leverage 2 - paper crypto leverage simulation",
+        "/crypto_on or /crypto_off - toggle crypto scanning",
         "/status - show account/bot status",
         "/positions - show positions",
         "/close_all - close paper positions",
@@ -949,6 +1104,10 @@ async def handle_command(env, text):
         return await send_message(env, "Python Worker paper auto-trading is OFF.")
     if cmd == "/scan_now":
         return await trade_loop(env, True)
+    if cmd == "/crypto_on":
+        return await crypto_toggle(env, True)
+    if cmd == "/crypto_off":
+        return await crypto_toggle(env, False)
     if cmd in {"/paper_buy", "/buy"}:
         return await manual_paper_buy(env, rest[0] if rest else "")
     if cmd == "/force_buy":
@@ -998,6 +1157,7 @@ class Default(WorkerEntrypoint):
             payload = {"runtime": "python-worker", "status": "ok"}
             try:
                 payload["risk"] = await get_risk(self.env)
+                payload["watchlist"] = await get_watchlist(self.env)
             except Exception as exc:
                 payload["status"] = "degraded"
                 payload["risk_error"] = str(exc)
