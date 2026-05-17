@@ -1,0 +1,1162 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Paper Trading Bot Dashboard</title>
+<script src="./assets/chart.umd.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0d0f14;
+    --bg2: #13161f;
+    --bg3: #1a1e2a;
+    --bg4: #212638;
+    --border: rgba(255,255,255,0.08);
+    --border2: rgba(255,255,255,0.14);
+    --text: #e8eaf0;
+    --text2: #9aa1b7;
+    --text3: #646d87;
+    --green: #4ade80;
+    --green-bg: rgba(74,222,128,0.12);
+    --red: #f87171;
+    --red-bg: rgba(248,113,113,0.12);
+    --amber: #fbbf24;
+    --amber-bg: rgba(251,191,36,0.12);
+    --blue: #60a5fa;
+    --blue-bg: rgba(96,165,250,0.12);
+    --violet: #a78bfa;
+    --violet-bg: rgba(167,139,250,0.12);
+    --radius: 8px;
+    --radius-sm: 6px;
+  }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    padding: 20px;
+    font-size: 14px;
+  }
+  .mono { font-family: "SF Mono", Consolas, monospace; }
+  .header { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 18px; }
+  .header h1 { font-size: 22px; font-weight: 650; letter-spacing: 0; }
+  .header p { font-size: 12px; color: var(--text2); margin-top: 3px; }
+  .live-badge {
+    display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+    background: var(--bg2); border: 1px solid var(--border2);
+    padding: 7px 12px; border-radius: 999px; font-size: 12px; color: var(--text2);
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.45} }
+  .metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
+  .metric, .card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+  .metric { padding: 14px 16px; min-width: 0; }
+  .metric-label { font-size: 11px; color: var(--text3); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 7px; }
+  .metric-value { font-size: 21px; font-weight: 650; font-family: "SF Mono", Consolas, monospace; overflow-wrap: anywhere; }
+  .main-grid { display: grid; grid-template-columns: 1fr 1.1fr; gap: 14px; margin-bottom: 14px; }
+  .analysis-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 14px; }
+  .trade-grid { display: grid; grid-template-columns: 1.05fr .95fr; gap: 14px; margin-bottom: 14px; }
+  .card { padding: 16px; min-width: 0; }
+  .card-title { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 13px; font-weight: 650; color: var(--text); margin-bottom: 12px; }
+  .subtle { color: var(--text3); font-size: 11px; font-weight: 400; }
+  .up { color: var(--green); }
+  .dn { color: var(--red); }
+  .warn { color: var(--amber); }
+  .blue { color: var(--blue); }
+  .wl-header, .wrow { display: grid; grid-template-columns: 1.45fr 1fr .7fr .55fr .7fr; gap: 8px; align-items: center; }
+  .wl-header {
+    font-size: 10px; color: var(--text3); text-transform: uppercase; letter-spacing: .4px;
+    padding: 0 4px 8px; border-bottom: 1px solid var(--border);
+  }
+  .wrow {
+    padding: 10px 4px;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+    transition: background .15s, border-color .15s;
+  }
+  .wrow:hover, .wrow.active { background: var(--bg3); }
+  .wrow:last-child { border-bottom: none; }
+  .sym { font-weight: 750; font-size: 13px; }
+  .name { font-size: 10px; color: var(--text3); margin-top: 2px; }
+  .right { text-align: right; }
+  .sig { display: inline-flex; justify-content: center; min-width: 48px; padding: 3px 8px; border-radius: 4px; font-size: 10px; font-weight: 800; letter-spacing: .3px; }
+  .sig-buy { background: rgba(74,222,128,.15); color: var(--green); border: 1px solid rgba(74,222,128,.28); }
+  .sig-sell { background: rgba(248,113,113,.15); color: var(--red); border: 1px solid rgba(248,113,113,.28); }
+  .sig-hold { background: rgba(251,191,36,.15); color: var(--amber); border: 1px solid rgba(251,191,36,.26); }
+  .sig-blocked { background: rgba(167,139,250,.15); color: var(--violet); border: 1px solid rgba(167,139,250,.3); min-width: 122px; }
+  .tabs { display: flex; gap: 4px; }
+  button, .tab {
+    background: var(--bg3); border: 1px solid var(--border2); color: var(--text);
+    border-radius: var(--radius-sm); padding: 8px 13px; font-size: 13px; cursor: pointer;
+    transition: all .15s; font-family: inherit; white-space: nowrap;
+  }
+  button:hover, .tab:hover { border-color: var(--blue); color: var(--blue); }
+  button.primary { background: var(--blue-bg); border-color: rgba(96,165,250,.38); color: var(--blue); font-weight: 650; }
+  button.buy { background: var(--green-bg); border-color: rgba(74,222,128,.35); color: var(--green); font-weight: 650; }
+  button.sell { background: var(--red-bg); border-color: rgba(248,113,113,.35); color: var(--red); font-weight: 650; }
+  button.danger { background: var(--red-bg); border-color: rgba(248,113,113,.35); color: var(--red); }
+  button:disabled { opacity: .45; cursor: not-allowed; border-color: var(--border); color: var(--text3); }
+  .tab { padding: 5px 10px; font-size: 12px; }
+  .tab.active { background: var(--blue-bg); color: var(--blue); border-color: rgba(96,165,250,.35); }
+  .chart-box { position: relative; width: 100%; height: 220px; }
+  .chart-footer { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 10px; font-size: 12px; color: var(--text2); }
+  .ta-grid, .risk-grid, .stats-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
+  .ta-metric, .risk-tile, .stat-tile {
+    background: var(--bg3);
+    border: 1px solid rgba(255,255,255,.03);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+    min-width: 0;
+  }
+  .ta-label, .stat-label, .field label {
+    font-size: 10px; color: var(--text3); text-transform: uppercase; letter-spacing: .4px; margin-bottom: 5px; display: block;
+  }
+  .ta-value, .stat-value { font-size: 15px; font-weight: 650; font-family: "SF Mono", Consolas, monospace; overflow-wrap: anywhere; }
+  .rsi-bar { height: 8px; background: var(--bg3); border-radius: 999px; position: relative; margin: 7px 0 5px; overflow: visible; }
+  .rsi-zone-buy { position: absolute; left: 0; width: 30%; height: 100%; background: rgba(74,222,128,.24); border-radius: 999px 0 0 999px; }
+  .rsi-zone-neutral { position: absolute; left: 30%; width: 40%; height: 100%; background: rgba(251,191,36,.08); }
+  .rsi-zone-sell { position: absolute; right: 0; width: 30%; height: 100%; background: rgba(248,113,113,.24); border-radius: 0 999px 999px 0; }
+  .rsi-dot { position: absolute; width: 12px; height: 12px; border-radius: 50%; background: var(--blue); top: -2px; transform: translateX(-50%); transition: left .6s ease; box-shadow: 0 0 8px rgba(96,165,250,.45); }
+  .summary-box { background: var(--bg3); border-radius: var(--radius-sm); padding: 11px 12px; font-size: 12px; color: var(--text2); line-height: 1.6; }
+  .summary-title { font-size: 11px; font-weight: 650; color: var(--text); margin-bottom: 5px; }
+  .field input {
+    width: 100%; background: var(--bg3); border: 1px solid var(--border2);
+    border-radius: var(--radius-sm); padding: 8px 10px; font-size: 13px;
+    color: var(--text); outline: none; font-family: "SF Mono", Consolas, monospace;
+  }
+  .field input:focus { border-color: rgba(96,165,250,.45); }
+  .field input[type="checkbox"] { width: 18px; height: 18px; accent-color: #60a5fa; }
+  .risk-form { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
+  .check-row { display: flex; align-items: center; gap: 8px; height: 38px; color: var(--text2); }
+  .trade-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
+  .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+  table { width: 100%; border-collapse: collapse; min-width: 720px; }
+  th, td { padding: 9px 10px; border-bottom: 1px solid var(--border); text-align: right; font-size: 12px; }
+  th { color: var(--text3); text-transform: uppercase; letter-spacing: .35px; font-size: 10px; background: var(--bg3); }
+  th:first-child, td:first-child { text-align: left; }
+  tr:last-child td { border-bottom: none; }
+  .empty { color: var(--text3); text-align: center; padding: 18px; font-size: 12px; }
+  .chat-wrap { display: flex; flex-direction: column; height: 330px; }
+  .chat-msgs { flex: 1; overflow-y: auto; min-height: 0; padding-right: 4px; margin-bottom: 10px; display: flex; flex-direction: column; gap: 8px; }
+  .cmsg-u, .cmsg-a { padding: 9px 12px; font-size: 13px; line-height: 1.5; max-width: 95%; overflow-wrap: anywhere; }
+  .cmsg-u { align-self: flex-end; color: var(--blue); background: var(--blue-bg); border: 1px solid rgba(96,165,250,.24); border-radius: 10px 10px 2px 10px; }
+  .cmsg-a { color: var(--text); background: var(--bg3); border: 1px solid var(--border); border-radius: 10px 10px 10px 2px; }
+  .chat-input-row { display: flex; gap: 8px; }
+  .chat-input-row input, .tg-grid input {
+    flex: 1; background: var(--bg3); border: 1px solid var(--border2);
+    border-radius: var(--radius-sm); padding: 8px 12px; font-size: 13px; color: var(--text); outline: none;
+  }
+  .api-grid, .tg-grid { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: end; }
+  .tg-grid { grid-template-columns: 1fr 1fr auto auto; }
+  .toggle-wrap { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text2); }
+  .toggle { width: 38px; height: 22px; border-radius: 999px; background: var(--bg3); border: 1px solid var(--border2); cursor: pointer; position: relative; transition: background .25s; flex-shrink: 0; }
+  .toggle.on { background: var(--green-bg); border-color: rgba(74,222,128,.36); }
+  .toggle-thumb { position: absolute; width: 16px; height: 16px; border-radius: 50%; background: var(--text2); top: 2px; left: 2px; transition: left .25s, background .25s; }
+  .toggle.on .toggle-thumb { left: 18px; background: var(--green); }
+  .guide { display: none; margin-top: 12px; background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 14px; font-size: 12px; color: var(--text2); line-height: 1.8; }
+  .guide code { background: rgba(255,255,255,.06); padding: 1px 5px; border-radius: 3px; font-family: "SF Mono", Consolas, monospace; font-size: 11px; color: var(--text); }
+  .status-line { margin-top: 8px; font-size: 12px; min-height: 18px; color: var(--text3); }
+  .toast { position: fixed; bottom: 24px; right: 24px; background: var(--bg2); border: 1px solid var(--border2); border-radius: var(--radius); padding: 12px 16px; font-size: 13px; display: none; z-index: 999; max-width: 340px; box-shadow: 0 8px 32px rgba(0,0,0,.42); }
+  .toast.show { display: block; animation: slideIn .25s ease; }
+  @keyframes slideIn { from{transform:translateY(16px);opacity:0} to{transform:translateY(0);opacity:1} }
+  @media(max-width: 1300px) {
+    .trade-grid { grid-template-columns: 1fr; }
+  }
+  @media(max-width: 1100px) {
+    .metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .main-grid, .analysis-grid { grid-template-columns: 1fr; }
+  }
+  @media(max-width: 760px) {
+    body { padding: 12px; }
+    .header { align-items: flex-start; flex-direction: column; }
+    .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .risk-form, .api-grid, .tg-grid { grid-template-columns: 1fr; }
+    .wl-header, .wrow { grid-template-columns: 1.15fr .9fr .6fr .55fr .8fr; gap: 5px; }
+    .metric-value { font-size: 18px; }
+    .trade-actions { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="header">
+  <div>
+    <h1>AI Paper Trading Bot Dashboard</h1>
+    <p>Simulated markets only | Risk managed paper positions | Telegram alerts | Educational use</p>
+  </div>
+  <div class="live-badge">
+    <span class="dot"></span>
+    <span>Paper mode</span>
+    <span class="mono" id="clock">--:--:--</span>
+  </div>
+</div>
+
+<div class="metrics">
+  <div class="metric"><div class="metric-label">Portfolio Value</div><div class="metric-value" id="port-val">$25,000</div></div>
+  <div class="metric"><div class="metric-label">Realized P&L</div><div class="metric-value" id="realized-val">$0</div></div>
+  <div class="metric"><div class="metric-label">Unrealized P&L</div><div class="metric-value" id="unrealized-val">$0</div></div>
+  <div class="metric"><div class="metric-label">Open Positions</div><div class="metric-value" id="open-count">0 / 3</div></div>
+  <div class="metric"><div class="metric-label">TG Alerts Sent</div><div class="metric-value" id="alert-cnt">0</div></div>
+</div>
+
+<div class="main-grid">
+  <div class="card">
+    <div class="card-title">
+      <span>Watchlist</span>
+      <span class="subtle">Click row to analyze</span>
+    </div>
+    <div class="wl-header">
+      <span>Asset</span><span class="right">Price</span><span class="right">Chg%</span><span class="right">RSI</span><span class="right">Signal</span>
+    </div>
+    <div id="watchlist"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">
+      <span id="chart-title">AAPL - Price Chart</span>
+      <div class="tabs">
+        <button class="tab active" onclick="setRange('1H')">1H</button>
+        <button class="tab" onclick="setRange('4H')">4H</button>
+        <button class="tab" onclick="setRange('1D')">1D</button>
+      </div>
+    </div>
+    <div class="chart-box"><canvas id="priceChart" role="img" aria-label="Simulated price chart"></canvas></div>
+    <div class="chart-footer" id="chart-footer"></div>
+  </div>
+</div>
+
+<div class="analysis-grid">
+  <div class="card">
+    <div class="card-title">Technical Analysis - <span id="ta-sym">AAPL</span></div>
+    <div style="margin-bottom:14px">
+      <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px">
+        <span style="color:var(--text2)">RSI (14)</span>
+        <span class="mono" style="font-weight:650" id="rsi-val">50.0</span>
+      </div>
+      <div class="rsi-bar">
+        <div class="rsi-zone-buy"></div>
+        <div class="rsi-zone-neutral"></div>
+        <div class="rsi-zone-sell"></div>
+        <div class="rsi-dot" id="rsi-dot"></div>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text3)">
+        <span>Oversold &lt;30</span><span>Neutral</span><span>Overbought &gt;70</span>
+      </div>
+    </div>
+    <div class="ta-grid">
+      <div class="ta-metric"><div class="ta-label">SMA 20</div><div class="ta-value" id="sma20">$0.00</div></div>
+      <div class="ta-metric"><div class="ta-label">SMA 50</div><div class="ta-value" id="sma50">$0.00</div></div>
+      <div class="ta-metric"><div class="ta-label">MACD</div><div class="ta-value" id="macd-v">0.00</div></div>
+      <div class="ta-metric"><div class="ta-label">Trend</div><div class="ta-value" id="trend-v">Neutral</div></div>
+    </div>
+    <div class="summary-box">
+      <div class="summary-title" id="sig-badge-wrap"></div>
+      <div id="sig-summary"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">
+      <span>Risk Management</span>
+      <span class="subtle" id="risk-guard-label">Guard ready</span>
+    </div>
+    <div class="risk-form">
+      <div class="field"><label>Risk / Trade %</label><input id="risk-per-trade" type="number" min="0.1" max="10" step="0.1" value="1"></div>
+      <div class="field"><label>Stop Loss %</label><input id="stop-loss-pct" type="number" min="0.1" max="25" step="0.1" value="2"></div>
+      <div class="field"><label>Take Profit %</label><input id="take-profit-pct" type="number" min="0.1" max="50" step="0.1" value="4"></div>
+      <div class="field"><label>Trailing Stop %</label><input id="trailing-stop-pct" type="number" min="0.1" max="25" step="0.1" value="1.5"></div>
+      <div class="field"><label>Max Daily Loss %</label><input id="max-daily-loss-pct" type="number" min="0.1" max="20" step="0.1" value="3"></div>
+      <div class="field"><label>Max Positions</label><input id="max-open-positions" type="number" min="1" max="8" step="1" value="3"></div>
+      <div class="field"><label>Cooldown Cycles</label><input id="cooldown-cycles" type="number" min="0" max="20" step="1" value="2"></div>
+      <label class="check-row"><input id="trailing-enabled" type="checkbox"> Trailing stop on</label>
+      <button class="primary" onclick="applyRiskSettings()">Apply Risk</button>
+    </div>
+    <div class="risk-grid">
+      <div class="risk-tile"><div class="ta-label">Suggested Entry</div><div class="ta-value" id="risk-entry">$0.00</div></div>
+      <div class="risk-tile"><div class="ta-label">Position Size</div><div class="ta-value" id="risk-size">0</div></div>
+      <div class="risk-tile"><div class="ta-label">Stop / Target</div><div class="ta-value" id="risk-stop-target">$0 / $0</div></div>
+      <div class="risk-tile"><div class="ta-label">Risk / Reward</div><div class="ta-value" id="risk-rr">1:2.00</div></div>
+    </div>
+    <div class="summary-box">
+      <div class="summary-title">Risk Guard</div>
+      <div id="risk-summary">Risk settings are ready. Paper orders will be sized from stop distance and portfolio value.</div>
+    </div>
+    <div class="trade-actions">
+      <button class="buy" id="paper-buy" onclick="openPaperPosition('LONG')">Paper Buy</button>
+      <button class="sell" id="paper-sell" onclick="openPaperPosition('SHORT')">Paper Sell</button>
+      <button onclick="closeSelectedPositions()">Close Selected</button>
+    </div>
+  </div>
+</div>
+
+<div class="trade-grid">
+  <div class="card">
+    <div class="card-title">
+      <span>Paper Positions</span>
+      <span class="subtle">Auto-closes on stop, target, trailing stop, or daily loss guard</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Asset</th><th>Side</th><th>Qty</th><th>Entry</th><th>Stop</th><th>Target</th><th>Trail</th><th>P&L</th><th>Action</th></tr>
+        </thead>
+        <tbody id="positions-body"><tr><td colspan="9" class="empty">No open paper positions yet.</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">
+      <span>Session Stats</span>
+      <button onclick="resetSession()">Reset Session</button>
+    </div>
+    <div class="stats-grid">
+      <div class="stat-tile"><div class="stat-label">Trades</div><div class="stat-value" id="stat-trades">0</div></div>
+      <div class="stat-tile"><div class="stat-label">Win Rate</div><div class="stat-value" id="stat-winrate">0%</div></div>
+      <div class="stat-tile"><div class="stat-label">Avg Win</div><div class="stat-value up" id="stat-avg-win">$0</div></div>
+      <div class="stat-tile"><div class="stat-label">Avg Loss</div><div class="stat-value dn" id="stat-avg-loss">$0</div></div>
+      <div class="stat-tile"><div class="stat-label">Max Drawdown</div><div class="stat-value dn" id="stat-drawdown">$0</div></div>
+      <div class="stat-tile"><div class="stat-label">Cooldowns</div><div class="stat-value warn" id="stat-cooldowns">0</div></div>
+    </div>
+    <div class="summary-box">
+      <div class="summary-title">Latest Trade</div>
+      <div id="last-trade">No closed trades yet.</div>
+    </div>
+  </div>
+</div>
+
+<div class="analysis-grid">
+  <div class="card">
+    <div class="card-title">
+      <span>AI Trader Chat</span>
+      <span class="subtle">Educational analysis only</span>
+    </div>
+    <div class="chat-wrap">
+      <div class="chat-msgs" id="chat-msgs">
+        <div class="cmsg-a">Hi. I can review the simulated ticker, technical signals, paper positions, and risk settings. I will keep it educational and avoid direct financial advice.</div>
+      </div>
+      <div class="chat-input-row">
+        <input type="text" id="chat-in" placeholder="Ask about BTC risk, AAPL stop, open positions..." onkeydown="if(event.key==='Enter')sendChat()">
+        <button class="primary" onclick="sendChat()">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <div class="card" style="margin-bottom:14px;border-color:rgba(96,165,250,.22)">
+      <div class="card-title">
+        <span>Anthropic API Key <span class="subtle">(optional for AI chat)</span></span>
+        <a href="https://console.anthropic.com/keys" target="_blank" style="font-size:12px;color:var(--blue);text-decoration:none">Get key</a>
+      </div>
+      <div class="api-grid">
+        <div class="field"><label>API Key</label><input type="password" id="api-key" placeholder="sk-ant-api03-..." oninput="saveKey()"></div>
+        <button class="primary" onclick="testApiKey()">Verify key</button>
+        <button onclick="clearSavedKey()">Clear saved key</button>
+      </div>
+      <div id="api-status" class="status-line"></div>
+      <div style="margin-top:8px;font-size:12px;color:var(--text3);line-height:1.6">
+        Browser-only demo: the key is stored in this browser's local storage and sent directly to Anthropic only when you use AI chat.
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">
+        <div>
+          <span>Telegram Notifications</span>
+          <div class="subtle" style="margin-top:3px">Signal, stop, target, trailing stop, and risk-guard alerts</div>
+        </div>
+        <div class="toggle-wrap">
+          <span>Auto-alerts</span>
+          <div class="toggle" id="auto-tog" onclick="toggleAuto()"><div class="toggle-thumb"></div></div>
+        </div>
+      </div>
+      <div class="tg-grid">
+        <div class="field"><label>Bot Token</label><input type="password" id="tg-tok" placeholder="1234567890:AABBccDDee..."></div>
+        <div class="field"><label>Chat ID</label><input type="text" id="tg-cid" placeholder="-1001234567890 or 123456789"></div>
+        <button class="primary" onclick="sendTestTG()">Test Alert</button>
+        <button onclick="toggleGuide()">Setup guide</button>
+      </div>
+      <div class="status-line" id="tg-status"></div>
+      <div class="guide" id="guide">
+        <strong style="color:var(--text)">Telegram setup:</strong><br><br>
+        <strong>Step 1</strong> - Open Telegram, search <code>@BotFather</code>, send <code>/newbot</code>, and copy the token.<br><br>
+        <strong>Step 2</strong> - Send your bot a message. Then open <code>https://api.telegram.org/bot&lt;YOUR_TOKEN&gt;/getUpdates</code> and copy the chat id.<br><br>
+        <strong>Step 3</strong> - Paste the token and chat id above, then send a test alert.
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const TICKERS = [
+  {symbol:'AAPL', name:'Apple Inc', base:185.50, vol:0.008},
+  {symbol:'TSLA', name:'Tesla', base:245.30, vol:0.018},
+  {symbol:'NVDA', name:'NVIDIA', base:875.20, vol:0.015},
+  {symbol:'MSFT', name:'Microsoft', base:415.80, vol:0.007},
+  {symbol:'BTC', name:'Bitcoin', base:68420, vol:0.022},
+  {symbol:'ETH', name:'Ethereum', base:3580, vol:0.025},
+  {symbol:'GOOGL', name:'Alphabet', base:175.40, vol:0.009},
+  {symbol:'SPY', name:'S&P 500 ETF', base:524.10, vol:0.005}
+];
+
+const HIST_LEN = 80;
+const hist = {};
+let myChart = null;
+let selSym = 'AAPL';
+let rng = '1H';
+let autoOn = false;
+let alertCnt = 0;
+let toastTimer;
+let chatHist = [];
+let nextPositionId = 1;
+
+let portfolioStart = 25000;
+let cashBalance = portfolioStart;
+let realizedPnL = 0;
+let equityHigh = portfolioStart;
+
+const riskSettings = {
+  riskPerTrade: 1,
+  stopLoss: 2,
+  takeProfit: 4,
+  trailingEnabled: false,
+  trailingStop: 1.5,
+  maxDailyLoss: 3,
+  maxOpenPositions: 3,
+  cooldownCycles: 2
+};
+const positions = [];
+const tradeLog = [];
+const cooldowns = {};
+const sigsSent = {};
+const riskAlertsSent = {};
+const sessionStats = {
+  trades: 0,
+  wins: 0,
+  losses: 0,
+  grossWin: 0,
+  grossLoss: 0,
+  maxDrawdown: 0
+};
+
+function initHist() {
+  TICKERS.forEach(t => {
+    let p = t.base;
+    const a = [];
+    for (let i = 0; i < HIST_LEN; i++) {
+      p *= 1 + (Math.random() - 0.5) * t.vol * 2;
+      a.push(+p.toFixed(2));
+    }
+    hist[t.symbol] = a;
+  });
+}
+
+function tickPrices() {
+  TICKERS.forEach(t => {
+    const h = hist[t.symbol];
+    const last = h[h.length - 1];
+    h.push(+(last * (1 + (Math.random() - 0.48) * t.vol)).toFixed(2));
+    if (h.length > HIST_LEN) h.shift();
+  });
+}
+
+function calcRSI(p, per = 14) {
+  if (p.length < per + 1) return 50;
+  const ch = p.slice(-per - 1).map((v, i, a) => i > 0 ? v - a[i-1] : 0).slice(1);
+  const ag = ch.map(c => c > 0 ? c : 0).reduce((a,b) => a + b, 0) / per;
+  const al = ch.map(c => c < 0 ? -c : 0).reduce((a,b) => a + b, 0) / per;
+  if (al === 0) return 100;
+  return +(100 - 100 / (1 + ag / al)).toFixed(1);
+}
+
+function calcEMA(p, per) {
+  if (p.length < per) return p[p.length - 1];
+  const k = 2 / (per + 1);
+  let e = p.slice(0, per).reduce((a,b) => a + b, 0) / per;
+  for (let i = per; i < p.length; i++) e = p[i] * k + e * (1 - k);
+  return e;
+}
+
+function calcSMA(p, per) {
+  if (p.length < per) return p[p.length - 1];
+  return +(p.slice(-per).reduce((a,b) => a + b, 0) / per).toFixed(2);
+}
+
+function fmt(v) {
+  const sign = v < 0 ? '-' : '';
+  const n = Math.abs(v);
+  return sign + (n >= 1000 ? '$' + n.toLocaleString('en', { maximumFractionDigits: 0 }) : '$' + n.toFixed(2));
+}
+
+function fmtQty(v) {
+  if (!Number.isFinite(v)) return '0';
+  if (v >= 100) return v.toFixed(0);
+  if (v >= 1) return v.toFixed(2);
+  return v.toFixed(5);
+}
+
+function getOpenPositions() {
+  return positions.filter(p => p.status === 'OPEN');
+}
+
+function getUnrealizedPnL() {
+  return getOpenPositions().reduce((sum, p) => sum + getPositionPnL(p, getPrice(p.symbol)), 0);
+}
+
+function getPortfolioValue() {
+  return portfolioStart + realizedPnL + getUnrealizedPnL();
+}
+
+function getPrice(sym) {
+  const p = hist[sym];
+  return p[p.length - 1];
+}
+
+function getPositionPnL(pos, price) {
+  return pos.side === 'LONG'
+    ? (price - pos.entry) * pos.qty
+    : (pos.entry - price) * pos.qty;
+}
+
+function getD(sym) {
+  const p = hist[sym];
+  const cur = p[p.length - 1];
+  const open = p[0];
+  const rsi = calcRSI(p);
+  const macd = +(calcEMA(p, 12) - calcEMA(p, 26)).toFixed(2);
+  const sma20 = calcSMA(p, 20);
+  const sma50 = calcSMA(p, 50);
+  const chgPct = +((cur - open) / open * 100).toFixed(2);
+  const bull = sma20 > sma50;
+  let sig = 'HOLD';
+  if (rsi < 35 || (rsi < 42 && macd > 0 && bull)) sig = 'BUY';
+  else if (rsi > 65 || (rsi > 60 && macd < 0 && !bull)) sig = 'SELL';
+  const confidence = calcConfidence(rsi, macd, bull, sig);
+  const blocked = getRiskBlock(sym);
+  const levels = calcTradePlan(sym, sig === 'SELL' ? 'SHORT' : 'LONG');
+  return { cur, chg: cur - open, chgPct, rsi, macd, sma20, sma50, bull, sig, confidence, blocked, levels };
+}
+
+function calcConfidence(rsi, macd, bull, sig) {
+  if (sig === 'HOLD') return 42;
+  let score = 50;
+  if (sig === 'BUY') {
+    score += Math.max(0, 35 - rsi) * 1.2;
+    if (macd > 0) score += 12;
+    if (bull) score += 10;
+  } else {
+    score += Math.max(0, rsi - 65) * 1.2;
+    if (macd < 0) score += 12;
+    if (!bull) score += 10;
+  }
+  return Math.max(45, Math.min(88, Math.round(score)));
+}
+
+function calcTradePlan(sym, side = 'LONG') {
+  const entry = getPrice(sym);
+  const stopDistance = entry * riskSettings.stopLoss / 100;
+  const targetDistance = entry * riskSettings.takeProfit / 100;
+  const stop = side === 'LONG' ? entry - stopDistance : entry + stopDistance;
+  const target = side === 'LONG' ? entry + targetDistance : entry - targetDistance;
+  const equity = Math.max(1, getPortfolioValue());
+  const riskDollars = equity * riskSettings.riskPerTrade / 100;
+  const qty = Math.max(0, riskDollars / Math.max(stopDistance, 0.01));
+  const rr = targetDistance / Math.max(stopDistance, 0.01);
+  return { entry, stop, target, qty, rr, riskDollars };
+}
+
+function dailyLossLimitDollars() {
+  return portfolioStart * riskSettings.maxDailyLoss / 100;
+}
+
+function sessionPnL() {
+  return realizedPnL + getUnrealizedPnL();
+}
+
+function getRiskBlock(sym) {
+  const open = getOpenPositions();
+  if (sessionPnL() <= -dailyLossLimitDollars()) return 'Max daily loss hit';
+  if (open.length >= riskSettings.maxOpenPositions) return 'Max positions open';
+  if ((cooldowns[sym] || 0) > 0) return `Cooldown ${cooldowns[sym]} cycles`;
+  return '';
+}
+
+function applyRiskSettings() {
+  riskSettings.riskPerTrade = clampNum('risk-per-trade', 0.1, 10, 1);
+  riskSettings.stopLoss = clampNum('stop-loss-pct', 0.1, 25, 2);
+  riskSettings.takeProfit = clampNum('take-profit-pct', 0.1, 50, 4);
+  riskSettings.trailingStop = clampNum('trailing-stop-pct', 0.1, 25, 1.5);
+  riskSettings.maxDailyLoss = clampNum('max-daily-loss-pct', 0.1, 20, 3);
+  riskSettings.maxOpenPositions = Math.round(clampNum('max-open-positions', 1, 8, 3));
+  riskSettings.cooldownCycles = Math.round(clampNum('cooldown-cycles', 0, 20, 2));
+  riskSettings.trailingEnabled = document.getElementById('trailing-enabled').checked;
+  syncRiskInputs();
+  renderAll();
+  showToast('Risk settings applied.');
+}
+
+function clampNum(id, min, max, fallback) {
+  const el = document.getElementById(id);
+  const val = Number(el.value);
+  const clamped = Number.isFinite(val) ? Math.min(max, Math.max(min, val)) : fallback;
+  el.value = clamped;
+  return clamped;
+}
+
+function syncRiskInputs() {
+  document.getElementById('risk-per-trade').value = riskSettings.riskPerTrade;
+  document.getElementById('stop-loss-pct').value = riskSettings.stopLoss;
+  document.getElementById('take-profit-pct').value = riskSettings.takeProfit;
+  document.getElementById('trailing-stop-pct').value = riskSettings.trailingStop;
+  document.getElementById('max-daily-loss-pct').value = riskSettings.maxDailyLoss;
+  document.getElementById('max-open-positions').value = riskSettings.maxOpenPositions;
+  document.getElementById('cooldown-cycles').value = riskSettings.cooldownCycles;
+  document.getElementById('trailing-enabled').checked = riskSettings.trailingEnabled;
+}
+
+function renderWL() {
+  let buys = 0;
+  let sells = 0;
+  document.getElementById('watchlist').innerHTML = TICKERS.map(t => {
+    const d = getD(t.symbol);
+    if (d.sig === 'BUY') buys++;
+    if (d.sig === 'SELL') sells++;
+    const sc = d.blocked && d.sig !== 'HOLD' ? 'sig-blocked' : d.sig === 'BUY' ? 'sig-buy' : d.sig === 'SELL' ? 'sig-sell' : 'sig-hold';
+    const label = d.blocked && d.sig !== 'HOLD' ? 'BLOCKED' : d.sig;
+    const cc = d.chg >= 0 ? 'up' : 'dn';
+    return `<div class="wrow ${t.symbol === selSym ? 'active' : ''}" onclick="sel('${t.symbol}')">
+      <span><div class="sym">${t.symbol}</div><div class="name">${t.name}</div></span>
+      <span class="right mono" style="font-weight:650;font-size:13px">${fmt(d.cur)}</span>
+      <span class="right ${cc}" style="font-size:12px">${d.chg >= 0 ? '+' : ''}${d.chgPct}%</span>
+      <span class="right mono" style="font-size:12px">${d.rsi}</span>
+      <span class="right"><span class="sig ${sc}">${label}</span></span>
+    </div>`;
+  }).join('');
+  document.getElementById('sig-count')?.remove?.();
+}
+
+function renderChart() {
+  const p = hist[selSym];
+  const len = rng === '1H' ? 24 : rng === '4H' ? 48 : 80;
+  const data = p.slice(-len);
+  const isUp = data[data.length - 1] >= data[0];
+  const col = isUp ? '#4ade80' : '#f87171';
+  const bg = isUp ? 'rgba(74,222,128,.08)' : 'rgba(248,113,113,.08)';
+  if (myChart) {
+    myChart.data.labels = data.map(() => '');
+    myChart.data.datasets[0].data = data;
+    myChart.data.datasets[0].borderColor = col;
+    myChart.data.datasets[0].backgroundColor = bg;
+    myChart.update('none');
+  } else {
+    const ctx = document.getElementById('priceChart').getContext('2d');
+    myChart = new Chart(ctx, {
+      type: 'line',
+      data: { labels: data.map(() => ''), datasets: [{ data, borderColor: col, backgroundColor: bg, fill: true, tension: .35, pointRadius: 0, borderWidth: 2 }] },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { display: false },
+          y: { display: true, grid: { color: 'rgba(255,255,255,.045)' }, ticks: { color: '#646d87', font: { size: 11, family: '"SF Mono", Consolas, monospace' }, callback: v => v >= 1000 ? '$' + (v / 1000).toFixed(0) + 'k' : '$' + v.toFixed(0) } }
+        }
+      }
+    });
+  }
+  document.getElementById('chart-footer').innerHTML =
+    `<span>Open <b>${fmt(hist[selSym][0])}</b></span>` +
+    `<span>High <b class="up">${fmt(Math.max(...data))}</b></span>` +
+    `<span>Low <b class="dn">${fmt(Math.min(...data))}</b></span>`;
+}
+
+function setRange(r) {
+  rng = r;
+  document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b.textContent === r));
+  renderChart();
+}
+
+function sel(sym) {
+  selSym = sym;
+  document.getElementById('chart-title').textContent = sym + ' - Price Chart';
+  document.getElementById('ta-sym').textContent = sym;
+  renderAll();
+}
+
+function renderTA() {
+  const d = getD(selSym);
+  document.getElementById('rsi-val').textContent = d.rsi;
+  document.getElementById('rsi-dot').style.left = Math.min(Math.max(d.rsi, 2), 98) + '%';
+  document.getElementById('sma20').textContent = fmt(d.sma20);
+  document.getElementById('sma50').textContent = fmt(d.sma50);
+  const macdEl = document.getElementById('macd-v');
+  macdEl.textContent = (d.macd >= 0 ? '+' : '') + d.macd;
+  macdEl.style.color = d.macd >= 0 ? '#4ade80' : '#f87171';
+  const trendEl = document.getElementById('trend-v');
+  trendEl.textContent = d.bull ? 'Bullish' : 'Bearish';
+  trendEl.style.color = d.bull ? '#4ade80' : '#f87171';
+  const sc = d.blocked && d.sig !== 'HOLD' ? 'sig-blocked' : d.sig === 'BUY' ? 'sig-buy' : d.sig === 'SELL' ? 'sig-sell' : 'sig-hold';
+  const label = d.blocked && d.sig !== 'HOLD' ? 'Blocked by Risk Guard' : d.sig;
+  document.getElementById('sig-badge-wrap').innerHTML = `Signal: <span class="sig ${sc}">${label}</span> <span class="subtle">Confidence ${d.confidence}%</span>`;
+  const side = d.sig === 'SELL' ? 'SHORT' : 'LONG';
+  const plan = calcTradePlan(selSym, side);
+  const base = d.sig === 'BUY'
+    ? `RSI ${d.rsi} and MACD ${d.macd >= 0 ? 'positive' : 'soft'} suggest a possible long setup.`
+    : d.sig === 'SELL'
+      ? `RSI ${d.rsi} and momentum suggest a possible short or profit-taking setup.`
+      : `RSI ${d.rsi} is neutral enough that this is a wait-and-observe setup.`;
+  const block = d.blocked && d.sig !== 'HOLD' ? ` Risk guard blocks new entries: ${d.blocked}.` : '';
+  document.getElementById('sig-summary').textContent =
+    `${base} Paper plan: entry ${fmt(plan.entry)}, stop ${fmt(plan.stop)}, target ${fmt(plan.target)}, risk/reward 1:${plan.rr.toFixed(2)}.${block}`;
+}
+
+function renderRiskPanel() {
+  const d = getD(selSym);
+  const side = d.sig === 'SELL' ? 'SHORT' : 'LONG';
+  const plan = calcTradePlan(selSym, side);
+  const block = getRiskBlock(selSym);
+  document.getElementById('risk-entry').textContent = `${fmt(plan.entry)} ${side}`;
+  document.getElementById('risk-size').textContent = `${fmtQty(plan.qty)} units`;
+  document.getElementById('risk-stop-target').textContent = `${fmt(plan.stop)} / ${fmt(plan.target)}`;
+  document.getElementById('risk-rr').textContent = `1:${plan.rr.toFixed(2)}`;
+  document.getElementById('risk-guard-label').textContent = block ? 'Blocked' : 'Guard ready';
+  document.getElementById('risk-guard-label').className = block ? 'subtle warn' : 'subtle';
+  document.getElementById('risk-summary').textContent = block
+    ? `New paper entries are blocked for ${selSym}: ${block}. Existing positions can still be closed.`
+    : `Next ${side} paper trade risks about ${fmt(plan.riskDollars)} with ${riskSettings.stopLoss}% stop and ${riskSettings.takeProfit}% target.`;
+  const canTrade = !block;
+  document.getElementById('paper-buy').disabled = !canTrade;
+  document.getElementById('paper-sell').disabled = !canTrade;
+}
+
+function openPaperPosition(side) {
+  applyRiskSettings();
+  const block = getRiskBlock(selSym);
+  if (block) {
+    showToast(`Risk guard blocked ${selSym}: ${block}`);
+    sendRiskGuardAlert(selSym, block);
+    return;
+  }
+  const plan = calcTradePlan(selSym, side);
+  const pos = {
+    id: nextPositionId++,
+    symbol: selSym,
+    side,
+    entry: plan.entry,
+    qty: plan.qty,
+    stop: plan.stop,
+    target: plan.target,
+    trail: null,
+    status: 'OPEN',
+    openedAt: new Date().toLocaleTimeString()
+  };
+  if (riskSettings.trailingEnabled) pos.trail = calcTrail(pos, plan.entry);
+  positions.push(pos);
+  showToast(`${side} paper position opened on ${selSym}.`);
+  renderAll();
+}
+
+function calcTrail(pos, price) {
+  const dist = price * riskSettings.trailingStop / 100;
+  return pos.side === 'LONG' ? price - dist : price + dist;
+}
+
+function updatePositions() {
+  for (const pos of getOpenPositions()) {
+    const price = getPrice(pos.symbol);
+    if (riskSettings.trailingEnabled) {
+      const nextTrail = calcTrail(pos, price);
+      if (pos.trail == null) pos.trail = nextTrail;
+      if (pos.side === 'LONG') pos.trail = Math.max(pos.trail, nextTrail);
+      else pos.trail = Math.min(pos.trail, nextTrail);
+    }
+    const trailHit = pos.trail != null && (pos.side === 'LONG' ? price <= pos.trail : price >= pos.trail);
+    const stopHit = pos.side === 'LONG' ? price <= pos.stop : price >= pos.stop;
+    const targetHit = pos.side === 'LONG' ? price >= pos.target : price <= pos.target;
+    const guardHit = sessionPnL() <= -dailyLossLimitDollars();
+    if (targetHit) closePosition(pos.id, 'Take profit hit');
+    else if (trailHit) closePosition(pos.id, 'Trailing stop hit');
+    else if (stopHit) closePosition(pos.id, 'Stop loss hit');
+    else if (guardHit) closePosition(pos.id, 'Daily loss guard');
+  }
+}
+
+function closePosition(id, reason = 'Manual close') {
+  const pos = positions.find(p => p.id === id && p.status === 'OPEN');
+  if (!pos) return;
+  const exit = getPrice(pos.symbol);
+  const pnl = getPositionPnL(pos, exit);
+  pos.status = 'CLOSED';
+  pos.exit = exit;
+  pos.closedAt = new Date().toLocaleTimeString();
+  pos.reason = reason;
+  pos.pnl = pnl;
+  realizedPnL += pnl;
+  tradeLog.push({...pos});
+  sessionStats.trades++;
+  if (pnl >= 0) {
+    sessionStats.wins++;
+    sessionStats.grossWin += pnl;
+  } else {
+    sessionStats.losses++;
+    sessionStats.grossLoss += Math.abs(pnl);
+    if (reason.includes('Stop')) cooldowns[pos.symbol] = riskSettings.cooldownCycles;
+  }
+  updateDrawdown();
+  sendPositionAlert(pos, reason, pnl);
+  showToast(`${pos.symbol} closed: ${reason} (${fmt(pnl)}).`);
+  renderAll();
+}
+
+function closeSelectedPositions() {
+  const selected = getOpenPositions().filter(p => p.symbol === selSym);
+  if (!selected.length) {
+    showToast(`No open ${selSym} paper position to close.`);
+    return;
+  }
+  selected.forEach(p => closePosition(p.id, 'Manual close'));
+}
+
+function updateDrawdown() {
+  const equity = getPortfolioValue();
+  equityHigh = Math.max(equityHigh, equity);
+  const dd = equityHigh - equity;
+  sessionStats.maxDrawdown = Math.max(sessionStats.maxDrawdown, dd);
+}
+
+function decayCooldowns() {
+  Object.keys(cooldowns).forEach(sym => {
+    if (cooldowns[sym] > 0) cooldowns[sym]--;
+    if (cooldowns[sym] <= 0) delete cooldowns[sym];
+  });
+}
+
+function renderPositions() {
+  const open = getOpenPositions();
+  const body = document.getElementById('positions-body');
+  if (!open.length) {
+    body.innerHTML = '<tr><td colspan="9" class="empty">No open paper positions yet.</td></tr>';
+    return;
+  }
+  body.innerHTML = open.map(p => {
+    const price = getPrice(p.symbol);
+    const pnl = getPositionPnL(p, price);
+    return `<tr>
+      <td><span class="mono">${p.symbol}</span></td>
+      <td class="${p.side === 'LONG' ? 'up' : 'dn'}">${p.side}</td>
+      <td class="mono">${fmtQty(p.qty)}</td>
+      <td class="mono">${fmt(p.entry)}</td>
+      <td class="mono dn">${fmt(p.stop)}</td>
+      <td class="mono up">${fmt(p.target)}</td>
+      <td class="mono">${p.trail == null ? '-' : fmt(p.trail)}</td>
+      <td class="mono ${pnl >= 0 ? 'up' : 'dn'}">${fmt(pnl)}</td>
+      <td><button onclick="closePosition(${p.id}, 'Manual close')">Close</button></td>
+    </tr>`;
+  }).join('');
+}
+
+function renderStats() {
+  const unrealized = getUnrealizedPnL();
+  const portfolio = portfolioStart + realizedPnL + unrealized;
+  document.getElementById('port-val').textContent = fmt(portfolio);
+  document.getElementById('realized-val').textContent = fmt(realizedPnL);
+  document.getElementById('realized-val').className = 'metric-value ' + (realizedPnL >= 0 ? 'up' : 'dn');
+  document.getElementById('unrealized-val').textContent = fmt(unrealized);
+  document.getElementById('unrealized-val').className = 'metric-value ' + (unrealized >= 0 ? 'up' : 'dn');
+  document.getElementById('open-count').textContent = `${getOpenPositions().length} / ${riskSettings.maxOpenPositions}`;
+  document.getElementById('alert-cnt').textContent = alertCnt;
+  document.getElementById('stat-trades').textContent = sessionStats.trades;
+  document.getElementById('stat-winrate').textContent = sessionStats.trades ? Math.round(sessionStats.wins / sessionStats.trades * 100) + '%' : '0%';
+  document.getElementById('stat-avg-win').textContent = sessionStats.wins ? fmt(sessionStats.grossWin / sessionStats.wins) : '$0';
+  document.getElementById('stat-avg-loss').textContent = sessionStats.losses ? fmt(sessionStats.grossLoss / sessionStats.losses) : '$0';
+  document.getElementById('stat-drawdown').textContent = fmt(sessionStats.maxDrawdown);
+  document.getElementById('stat-cooldowns').textContent = Object.keys(cooldowns).length;
+  const last = tradeLog[tradeLog.length - 1];
+  document.getElementById('last-trade').textContent = last
+    ? `${last.symbol} ${last.side} closed at ${fmt(last.exit)} for ${fmt(last.pnl)}. Reason: ${last.reason}.`
+    : 'No closed trades yet.';
+}
+
+function resetSession() {
+  positions.length = 0;
+  tradeLog.length = 0;
+  Object.keys(cooldowns).forEach(k => delete cooldowns[k]);
+  realizedPnL = 0;
+  cashBalance = portfolioStart;
+  equityHigh = portfolioStart;
+  sessionStats.trades = 0;
+  sessionStats.wins = 0;
+  sessionStats.losses = 0;
+  sessionStats.grossWin = 0;
+  sessionStats.grossLoss = 0;
+  sessionStats.maxDrawdown = 0;
+  renderAll();
+  showToast('Paper session reset.');
+}
+
+function buildTelegramSignalMessage(sym) {
+  const d = getD(sym);
+  const side = d.sig === 'SELL' ? 'SHORT' : 'LONG';
+  const plan = calcTradePlan(sym, side);
+  const block = d.blocked && d.sig !== 'HOLD' ? `\nRisk guard: ${d.blocked}` : '';
+  return `<b>${d.sig} Signal: ${sym}</b>\n\n` +
+    `Price: ${fmt(d.cur)}\nConfidence: ${d.confidence}%\n` +
+    `Entry: ${fmt(plan.entry)}\nStop loss: ${fmt(plan.stop)}\nTake profit: ${fmt(plan.target)}\n` +
+    `Risk/reward: 1:${plan.rr.toFixed(2)}\nPosition size: ${fmtQty(plan.qty)} units${block}\n\n` +
+    `<i>Paper trading simulation only. Educational, not financial advice.</i>`;
+}
+
+async function tgSend(text) {
+  const tok = document.getElementById('tg-tok').value.trim();
+  const cid = document.getElementById('tg-cid').value.trim();
+  if (!tok || !cid) return { ok: false, error: 'missing_fields' };
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${tok}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: cid, text, parse_mode: 'HTML' })
+    });
+    return await r.json();
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+async function sendTestTG() {
+  const s = document.getElementById('tg-status');
+  s.style.color = '#9aa1b7';
+  s.textContent = 'Connecting to Telegram...';
+  const res = await tgSend(buildTelegramSignalMessage(selSym));
+  if (res.ok) {
+    s.style.color = '#4ade80';
+    s.textContent = 'Message sent. Check your Telegram chat.';
+    alertCnt++;
+    renderStats();
+    showToast('Telegram test alert sent.');
+  } else {
+    s.style.color = '#f87171';
+    s.textContent = 'Telegram error: ' + telegramErrorText(res);
+  }
+}
+
+function telegramErrorText(res) {
+  if (res.error === 'missing_fields') return 'Please enter both Bot Token and Chat ID.';
+  if (res.description?.includes('bot was blocked')) return 'Your bot was blocked. Open Telegram and message your bot first.';
+  if (res.description?.includes('chat not found')) return 'Chat not found. Double-check your Chat ID.';
+  if (res.description?.includes('Unauthorized')) return 'Invalid bot token.';
+  return res.description || res.error || 'Network error.';
+}
+
+function toggleAuto() {
+  autoOn = !autoOn;
+  document.getElementById('auto-tog').classList.toggle('on', autoOn);
+  showToast(autoOn ? 'Auto-alerts enabled.' : 'Auto-alerts disabled.');
+}
+
+async function checkAutoAlerts() {
+  if (!autoOn) return;
+  for (const t of TICKERS) {
+    const d = getD(t.symbol);
+    const key = `${t.symbol}:${d.sig}:${d.blocked || 'ok'}`;
+    if (d.sig !== 'HOLD' && sigsSent[t.symbol] !== key) {
+      sigsSent[t.symbol] = key;
+      const res = await tgSend(buildTelegramSignalMessage(t.symbol));
+      if (res.ok) {
+        alertCnt++;
+        renderStats();
+      }
+    }
+  }
+}
+
+async function sendPositionAlert(pos, reason, pnl) {
+  if (!autoOn) return;
+  const msg = `<b>Paper Position Closed: ${pos.symbol}</b>\n\n` +
+    `Side: ${pos.side}\nReason: ${reason}\nEntry: ${fmt(pos.entry)}\nExit: ${fmt(pos.exit)}\nP&L: ${fmt(pnl)}\n\n` +
+    `<i>Paper trading simulation only. Educational, not financial advice.</i>`;
+  const res = await tgSend(msg);
+  if (res.ok) {
+    alertCnt++;
+    renderStats();
+  }
+}
+
+async function sendRiskGuardAlert(sym, block) {
+  if (!autoOn) return;
+  const key = `${sym}:${block}`;
+  if (riskAlertsSent[key]) return;
+  riskAlertsSent[key] = true;
+  const res = await tgSend(`<b>Risk Guard Activated: ${sym}</b>\n\n${block}\nNo new paper entries were opened.\n\n<i>Educational simulation only.</i>`);
+  if (res.ok) {
+    alertCnt++;
+    renderStats();
+  }
+}
+
+function toggleGuide() {
+  const g = document.getElementById('guide');
+  g.style.display = g.style.display === 'block' ? 'none' : 'block';
+}
+
+function getApiKey() {
+  return document.getElementById('api-key').value.trim() || localStorage.getItem('tb_api_key') || '';
+}
+
+function saveKey() {
+  const k = document.getElementById('api-key').value.trim();
+  if (k) localStorage.setItem('tb_api_key', k);
+  document.getElementById('api-status').textContent = '';
+}
+
+function clearSavedKey() {
+  localStorage.removeItem('tb_api_key');
+  document.getElementById('api-key').value = '';
+  document.getElementById('api-status').style.color = '#9aa1b7';
+  document.getElementById('api-status').textContent = 'Saved key cleared.';
+}
+
+async function testApiKey() {
+  const k = getApiKey();
+  const s = document.getElementById('api-status');
+  if (!k) {
+    s.style.color = '#f87171';
+    s.textContent = 'Please paste your API key first.';
+    return;
+  }
+  s.style.color = '#9aa1b7';
+  s.textContent = 'Verifying...';
+  try {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': k, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 20, messages: [{ role: 'user', content: 'ping' }] })
+    });
+    const d = await r.json();
+    if (d.content) {
+      s.style.color = '#4ade80';
+      s.textContent = 'API key verified. AI chat is ready.';
+      localStorage.setItem('tb_api_key', k);
+    } else {
+      s.style.color = '#f87171';
+      s.textContent = d.error?.message || 'Invalid key.';
+    }
+  } catch (e) {
+    s.style.color = '#f87171';
+    s.textContent = 'Network error. Check your connection.';
+  }
+}
+
+async function sendChat() {
+  const inp = document.getElementById('chat-in');
+  const msg = inp.value.trim();
+  if (!msg) return;
+  const box = document.getElementById('chat-msgs');
+  const apiKey = getApiKey();
+  if (!apiKey) {
+    box.innerHTML += '<div class="cmsg-a" style="border-color:rgba(251,191,36,.3)">Add an Anthropic API key first if you want AI chat. The dashboard itself works without it.</div>';
+    box.scrollTop = box.scrollHeight;
+    return;
+  }
+  inp.value = '';
+  box.innerHTML += `<div class="cmsg-u">${escapeHtml(msg)}</div>`;
+  chatHist.push({ role: 'user', content: msg });
+  const typing = document.createElement('div');
+  typing.className = 'cmsg-a';
+  typing.textContent = '...';
+  box.appendChild(typing);
+  box.scrollTop = box.scrollHeight;
+  const d = getD(selSym);
+  const planLong = calcTradePlan(selSym, 'LONG');
+  const openPositions = getOpenPositions().map(p => `${p.symbol} ${p.side} qty ${fmtQty(p.qty)} entry ${fmt(p.entry)} stop ${fmt(p.stop)} target ${fmt(p.target)} unrealized ${fmt(getPositionPnL(p, getPrice(p.symbol)))}`).join('\n') || 'No open positions';
+  const mktCtx = TICKERS.map(t => {
+    const x = getD(t.symbol);
+    return `${t.symbol}: ${fmt(x.cur)}, RSI ${x.rsi}, Signal ${x.sig}, Confidence ${x.confidence}%, MACD ${x.macd}, Trend ${x.bull ? 'Bullish' : 'Bearish'}, Block ${x.blocked || 'None'}`;
+  }).join('\n');
+  try {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1000,
+        system: `You are an educational AI trading assistant inside a browser-only paper trading simulator. Do not give direct financial advice or tell the user what they must buy or sell. Explain signal quality, risk, stop-loss placement, take-profit planning, and paper-trading process. Keep answers concise.\n\nSelected ticker: ${selSym}\nSelected data: price ${fmt(d.cur)}, RSI ${d.rsi}, MACD ${d.macd}, trend ${d.bull ? 'Bullish' : 'Bearish'}, signal ${d.sig}, confidence ${d.confidence}%\nRisk settings: risk ${riskSettings.riskPerTrade}% per trade, stop ${riskSettings.stopLoss}%, target ${riskSettings.takeProfit}%, trailing ${riskSettings.trailingEnabled ? riskSettings.trailingStop + '%' : 'off'}, max daily loss ${riskSettings.maxDailyLoss}%, max positions ${riskSettings.maxOpenPositions}, cooldown ${riskSettings.cooldownCycles} cycles\nExample long plan: entry ${fmt(planLong.entry)}, stop ${fmt(planLong.stop)}, target ${fmt(planLong.target)}, size ${fmtQty(planLong.qty)}\nOpen positions:\n${openPositions}\n\nAll market data:\n${mktCtx}`,
+        messages: chatHist.slice(-8)
+      })
+    });
+    const data = await r.json();
+    if (data.error) {
+      typing.textContent = 'API error: ' + data.error.message;
+      typing.style.borderColor = 'rgba(248,113,113,.3)';
+    } else {
+      const reply = data.content?.[0]?.text || 'No response received.';
+      chatHist.push({ role: 'assistant', content: reply });
+      typing.textContent = reply;
+    }
+  } catch (e) {
+    typing.textContent = 'Network error. Check your connection and try again.';
+    typing.style.borderColor = 'rgba(248,113,113,.3)';
+  }
+  box.scrollTop = box.scrollHeight;
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 4000);
+}
+
+function updateClock() {
+  document.getElementById('clock').textContent = new Date().toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function renderAll() {
+  renderWL();
+  renderChart();
+  renderTA();
+  renderRiskPanel();
+  renderPositions();
+  renderStats();
+}
+
+function marketCycle() {
+  tickPrices();
+  updatePositions();
+  decayCooldowns();
+  updateDrawdown();
+  renderAll();
+  checkAutoAlerts();
+}
+
+document.querySelectorAll('#risk-per-trade,#stop-loss-pct,#take-profit-pct,#trailing-stop-pct,#max-daily-loss-pct,#max-open-positions,#cooldown-cycles,#trailing-enabled')
+  .forEach(el => el.addEventListener('change', applyRiskSettings));
+
+const savedKey = localStorage.getItem('tb_api_key');
+if (savedKey) {
+  document.getElementById('api-key').value = savedKey;
+  document.getElementById('api-status').style.color = '#4ade80';
+  document.getElementById('api-status').textContent = 'API key loaded from last session.';
+}
+
+syncRiskInputs();
+initHist();
+renderAll();
+updateClock();
+setInterval(marketCycle, 3000);
+setInterval(updateClock, 1000);
+</script>
+</body>
+</html>
+
