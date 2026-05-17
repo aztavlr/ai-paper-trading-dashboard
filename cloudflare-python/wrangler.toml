@@ -1,0 +1,19 @@
+name = "ai-paper-trading-telegram-bot"
+main = "worker.py"
+compatibility_date = "2026-05-17"
+compatibility_flags = ["python_workers", "disable_python_external_sdk"]
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[secrets]
+required = [
+  "TELEGRAM_BOT_TOKEN",
+  "TELEGRAM_ALLOWED_CHAT_ID",
+  "TELEGRAM_WEBHOOK_SECRET",
+  "ALPACA_API_KEY_ID",
+  "ALPACA_API_SECRET_KEY",
+  "SUPABASE_URL",
+  "SUPABASE_SERVICE_ROLE_KEY",
+  "BOT_OWNER_ID"
+]

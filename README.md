@@ -23,6 +23,7 @@ Open `index.html` in a browser.
 - Optional always-on Telegram command bot in `bot/`
 - Optional Python Telegram command bot in `python-bot/`
 - Optional free Cloudflare Worker deployment in `cloudflare/`
+- Python Cloudflare Worker migration in `cloudflare-python/`
 - Optional Supabase backend schema in `supabase/`
 
 ## Safety Note
@@ -52,3 +53,7 @@ See `python-bot/README.md`.
 For a free no-PC deployment, use the Cloudflare Worker version in `cloudflare/`. It uses Telegram webhooks plus scheduled Cloudflare cron checks, so it does not run on your computer. The Worker can use Supabase as a private backend for bot state and event logs.
 
 See `cloudflare/README.md`.
+
+The active Worker can also be deployed from `cloudflare-python/`, which ports the always-on Telegram paper bot to Python while keeping the same Worker URL and Cloudflare secrets.
+
+See `cloudflare-python/README.md`.
