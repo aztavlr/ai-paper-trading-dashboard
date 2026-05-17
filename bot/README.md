@@ -36,6 +36,8 @@ Keep that terminal open. If it closes, the bot stops listening.
 - `/stop_trading` or `/auto_off` - stop opening new paper trades
 - `/scan_now` - scan the watchlist right now
 - `/paper_buy AAPL` - manually open a risk-sized paper bracket buy
+- `/explain AAPL` - show the candle/indicator readout
+- `/strategy` - show current strategy settings
 - `/status` - show bot/account status
 - `/positions` - list open paper positions
 - `/close_all` - close all open paper positions and stop trading
@@ -45,7 +47,7 @@ Keep that terminal open. If it closes, the bot stops listening.
 
 ## Safety
 
-This bot opens paper bracket buy orders only. It uses a simple educational RSI/SMA signal and should not be treated as a profitable trading system.
+This bot opens paper bracket buy orders only. It scores EMA trend, RSI, MACD, Bollinger Bands, VWAP, volume, ATR volatility, support/resistance, and candlestick patterns. It should still not be treated as a profitable trading system.
 
 Automation starts only after you send `/start_trading` or `/auto_on` in Telegram. It checks the watchlist on the configured interval and applies max daily loss, max open positions, duplicate-position, cooldown, stop-loss, and take-profit rules.
 

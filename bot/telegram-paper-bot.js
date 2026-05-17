@@ -18,6 +18,10 @@ const CFG = {
   takeProfitPct: num(process.env.TAKE_PROFIT_PCT, 4),
   maxPositions: Math.max(1, Math.floor(num(process.env.MAX_OPEN_POSITIONS, 3))),
   maxDailyLossPct: num(process.env.MAX_DAILY_LOSS_PCT, 3),
+  minConfidence: num(process.env.MIN_CONFIDENCE, 72),
+  timeframe: process.env.BAR_TIMEFRAME || "5Min",
+  atrStopMultiplier: num(process.env.ATR_STOP_MULTIPLIER, 1.5),
+  takeProfitR: num(process.env.TAKE_PROFIT_R_MULTIPLIER, 2),
   watchlist: (process.env.WATCHLIST || "AAPL,TSLA,NVDA,MSFT,SPY").split(",").map(s => s.trim().toUpperCase()).filter(Boolean)
 };
 
@@ -118,6 +122,8 @@ async function handleCommand(text) {
   }
   if (cmd === "/scan_now") return tradeLoop(true);
   if (cmd === "/paper_buy" || cmd === "/buy") return manualPaperBuy(rest[0]);
+  if (cmd === "/explain") return explainSymbol(rest[0]);
+  if (cmd === "/strategy") return sendMessage(strategyText());
   if (cmd === "/status") return sendMessage(await statusText());
   if (cmd === "/positions") return sendMessage(await positionsText());
   if (cmd === "/close_all") return closeAllPositions();
@@ -137,6 +143,8 @@ function helpText() {
     "/stop_trading or /auto_off - stop opening new paper trades",
     "/scan_now - check the watchlist right now",
     "/paper_buy AAPL - manually open a risk-sized paper bracket buy",
+    "/explain AAPL - show the candle/indicator readout",
+    "/strategy - show current strategy settings",
     "/status - show bot/account status",
     "/positions - list open paper positions",
     "/close_all - close all open paper positions",
@@ -180,28 +188,27 @@ async function tradeLoop(notifyNoTrade = false) {
       return;
     }
 
-    const snapshots = await fetchSnapshots(CFG.watchlist);
-    const summary = { scanned: 0, warmup: 0, hold: 0, blocked: 0, noPrice: 0, submitted: 0 };
+    const summary = { scanned: 0, warmup: 0, hold: 0, lowConfidence: 0, blocked: 0, noPrice: 0, submitted: 0 };
     for (const symbol of CFG.watchlist) {
       summary.scanned++;
       const currentPositions = await fetchPositions();
       if (currentPositions.length >= CFG.maxPositions) break;
       if (currentPositions.some(p => p.symbol === symbol)) { summary.blocked++; continue; }
       if ((cooldowns.get(symbol) || 0) > Date.now()) { summary.blocked++; continue; }
-      const price = snapshotPrice(snapshots[symbol]);
-      if (!price) { summary.noPrice++; continue; }
-      pushHistory(symbol, price);
-      const signal = getSignal(symbol);
-      if (signal === "WARMUP") { summary.warmup++; continue; }
-      if (signal !== "BUY") { summary.hold++; continue; }
+      const bars = await fetchBars(symbol, CFG.timeframe, 160);
+      const analysis = analyzeBars(bars);
+      if (!analysis.price) { summary.noPrice++; continue; }
+      if (analysis.action === "WARMUP") { summary.warmup++; continue; }
+      if (analysis.action !== "BUY") { summary.hold++; continue; }
+      if (analysis.confidence < CFG.minConfidence) { summary.lowConfidence++; continue; }
       if (!tradingEnabled) { summary.blocked++; continue; }
-      const qty = positionSize(equity, price);
+      const qty = positionSize(equity, analysis.price, analysis.stop);
       if (qty < 1) { summary.blocked++; continue; }
-      const order = await submitBracketBuy(symbol, qty, price);
+      const order = await submitBracketBuy(symbol, qty, analysis.price, analysis);
       lastTradeAt = Date.now();
       cooldowns.set(symbol, Date.now() + CFG.tradeMs * 3);
       summary.submitted++;
-      await sendMessage(`Paper BUY submitted: ${symbol}\nQty: ${qty}\nEntry ref: ${money(price)}\nStop: ${money(price * (1 - CFG.stopPct / 100))}\nTarget: ${money(price * (1 + CFG.takeProfitPct / 100))}\nOrder: ${order.id || "submitted"}`);
+      await sendMessage(`Paper BUY submitted: ${symbol}\nConfidence: ${analysis.confidence}%\nQty: ${qty}\nEntry ref: ${money(analysis.price)}\nStop: ${money(analysis.stop)}\nTarget: ${money(analysis.target)}\nWhy: ${analysis.reasons.slice(0, 4).join("; ")}\nOrder: ${order.id || "submitted"}`);
     }
     if (notifyNoTrade && summary.submitted === 0) {
       await sendMessage([
@@ -209,6 +216,7 @@ async function tradeLoop(notifyNoTrade = false) {
         `Scanned: ${summary.scanned}`,
         `Warmup: ${summary.warmup}`,
         `Hold: ${summary.hold}`,
+        `Low confidence: ${summary.lowConfidence}`,
         `Blocked: ${summary.blocked}`,
         `No price: ${summary.noPrice}`
       ].join("\n"));
@@ -236,42 +244,114 @@ async function manualPaperBuy(rawSymbol) {
   if (open.some(p => p.symbol === symbol)) return sendMessage(`Risk guard blocked ${symbol}: position already open.`);
   if ((cooldowns.get(symbol) || 0) > Date.now()) return sendMessage(`Risk guard blocked ${symbol}: cooldown is active.`);
 
-  const snapshots = await fetchSnapshots([symbol]);
-  const price = snapshotPrice(snapshots[symbol]);
-  if (!price) return sendMessage(`Could not get an Alpaca paper market price for ${symbol}. This bot currently supports Alpaca stock/ETF symbols.`);
-  const qty = positionSize(equity, price);
+  const bars = await fetchBars(symbol, CFG.timeframe, 160);
+  const analysis = analyzeBars(bars);
+  if (!analysis.price) return sendMessage(`Could not get Alpaca candle data for ${symbol}. This bot currently supports Alpaca stock/ETF symbols.`);
+  const qty = positionSize(equity, analysis.price, analysis.stop);
   if (qty < 1) return sendMessage(`Risk sizing blocked ${symbol}: account equity/risk settings produce quantity below 1 share.`);
 
-  const order = await submitBracketBuy(symbol, qty, price);
+  const order = await submitBracketBuy(symbol, qty, analysis.price, analysis);
   lastTradeAt = Date.now();
   cooldowns.set(symbol, Date.now() + CFG.tradeMs * 3);
-  return sendMessage(`Manual paper BUY submitted: ${symbol}\nQty: ${qty}\nEntry ref: ${money(price)}\nStop: ${money(price * (1 - CFG.stopPct / 100))}\nTarget: ${money(price * (1 + CFG.takeProfitPct / 100))}\nOrder: ${order.id || "submitted"}`);
+  return sendMessage(`Manual paper BUY submitted: ${symbol}\nConfidence: ${analysis.confidence}%\nQty: ${qty}\nEntry ref: ${money(analysis.price)}\nStop: ${money(analysis.stop)}\nTarget: ${money(analysis.target)}\nWhy: ${analysis.reasons.slice(0, 4).join("; ")}\nOrder: ${order.id || "submitted"}`);
 }
 
 function normalizeSymbol(value) {
   return String(value || "").toUpperCase().replace(/[^A-Z.]/g, "").slice(0, 12);
 }
 
-function pushHistory(symbol, price) {
-  const h = prices.get(symbol) || [];
-  h.push(price);
-  while (h.length > 60) h.shift();
-  prices.set(symbol, h);
-}
-
-function getSignal(symbol) {
-  const h = prices.get(symbol) || [];
-  if (h.length < 20) return "WARMUP";
-  const rsi = calcRSI(h);
-  const sma8 = sma(h, 8);
-  const sma20 = sma(h, 20);
-  return rsi < 38 && sma8 > sma20 ? "BUY" : "HOLD";
-}
-
-function positionSize(equity, price) {
+function positionSize(equity, price, stopPrice = null) {
   const riskDollars = equity * CFG.riskPct / 100;
-  const riskPerShare = price * CFG.stopPct / 100;
+  const riskPerShare = stopPrice ? Math.abs(price - stopPrice) : price * CFG.stopPct / 100;
   return Math.max(0, Math.floor(riskDollars / riskPerShare));
+}
+
+async function explainSymbol(rawSymbol) {
+  const symbol = normalizeSymbol(rawSymbol);
+  if (!symbol) return sendMessage("Usage: /explain AAPL");
+  const bars = await fetchBars(symbol, CFG.timeframe, 160);
+  const a = analyzeBars(bars);
+  if (!a.price) return sendMessage(`No candle data available for ${symbol}.`);
+  return sendMessage([
+    `${symbol} advanced readout (${CFG.timeframe})`,
+    `Action: ${a.action}`,
+    `Confidence: ${a.confidence}% / required ${CFG.minConfidence}%`,
+    `Price: ${money(a.price)}`,
+    `RSI: ${a.rsi.toFixed(1)} | MACD hist: ${a.macdHist.toFixed(3)}`,
+    `Trend: ${a.trend}`,
+    `ATR: ${money(a.atr)} | Stop: ${money(a.stop)} | Target: ${money(a.target)}`,
+    `Pattern: ${a.pattern || "none"}`,
+    `Why: ${a.reasons.join("; ")}`
+  ].join("\n"));
+}
+
+function strategyText() {
+  return [
+    "Advanced paper strategy:",
+    `Timeframe: ${CFG.timeframe}`,
+    `Minimum confidence: ${CFG.minConfidence}%`,
+    `Risk per trade: ${CFG.riskPct}%`,
+    `ATR stop multiplier: ${CFG.atrStopMultiplier}x`,
+    `Take profit: ${CFG.takeProfitR}R`,
+    "Reads: EMA trend, RSI, MACD, Bollinger position, VWAP, volume, ATR volatility, support/resistance, and candlestick patterns.",
+    "Still educational paper trading only. No method is 100% accurate."
+  ].join("\n");
+}
+
+function analyzeBars(bars) {
+  if (!Array.isArray(bars) || bars.length < 60) {
+    return { action: "WARMUP", confidence: 0, price: latestBarPrice(bars), reasons: ["Need at least 60 candles"] };
+  }
+  const closes = bars.map(b => b.c);
+  const highs = bars.map(b => b.h);
+  const lows = bars.map(b => b.l);
+  const volumes = bars.map(b => b.v);
+  const price = closes[closes.length - 1];
+  const ema9v = last(emaSeries(closes, 9));
+  const ema21v = last(emaSeries(closes, 21));
+  const ema50v = last(emaSeries(closes, 50));
+  const rsi = calcRSI(closes);
+  const macdData = calcMACD(closes);
+  const atrValue = calcATR(bars, 14);
+  const bb = calcBollinger(closes, 20);
+  const vwap = calcVWAP(bars.slice(-40));
+  const avgVol = sma(volumes.slice(-21, -1), 20) || 0;
+  const volRatio = avgVol ? last(volumes) / avgVol : 1;
+  const recentHigh = Math.max(...highs.slice(-30, -1));
+  const recentLow = Math.min(...lows.slice(-30, -1));
+  const pattern = candlePattern(bars);
+
+  let score = 50;
+  const reasons = [];
+  const trendUp = ema9v > ema21v && ema21v > ema50v;
+  const trendDown = ema9v < ema21v && ema21v < ema50v;
+  if (trendUp) { score += 16; reasons.push("EMA trend up"); }
+  else if (trendDown) { score -= 18; reasons.push("EMA trend down"); }
+  else reasons.push("Mixed EMA trend");
+
+  if (price > vwap) { score += 7; reasons.push("Price above VWAP"); }
+  else { score -= 5; reasons.push("Price below VWAP"); }
+  if (rsi >= 42 && rsi <= 62) { score += 8; reasons.push("RSI healthy"); }
+  else if (rsi < 35) { score += 5; reasons.push("RSI oversold bounce candidate"); }
+  else if (rsi > 72) { score -= 12; reasons.push("RSI overbought"); }
+  if (macdData.hist > 0 && macdData.hist > macdData.prevHist) { score += 12; reasons.push("MACD improving"); }
+  else if (macdData.hist < 0 && macdData.hist < macdData.prevHist) { score -= 12; reasons.push("MACD weakening"); }
+  if (bb.widthPct > 0.6 && bb.widthPct < 8) { score += 4; reasons.push("Volatility usable"); }
+  else if (bb.widthPct >= 8) { score -= 8; reasons.push("Volatility elevated"); }
+  if (price > bb.upper) { score -= 8; reasons.push("Extended above Bollinger band"); }
+  if (price < bb.lower) { score += 5; reasons.push("Below lower Bollinger band"); }
+  if (volRatio >= 1.15) { score += 7; reasons.push("Volume confirmation"); }
+  if (price > recentHigh) { score += 9; reasons.push("Breakout above recent high"); }
+  if (price < recentLow) { score -= 10; reasons.push("Breakdown below recent low"); }
+  if (pattern?.bullish) { score += pattern.weight; reasons.push(pattern.name); }
+  if (pattern?.bearish) { score -= pattern.weight; reasons.push(pattern.name); }
+
+  const confidence = clamp(Math.round(score), 1, 96);
+  const stopDistance = Math.max((atrValue || 0) * CFG.atrStopMultiplier, price * CFG.stopPct / 100);
+  const stop = roundPrice(price - stopDistance);
+  const target = roundPrice(price + stopDistance * CFG.takeProfitR);
+  const action = confidence >= CFG.minConfidence && !trendDown ? "BUY" : "HOLD";
+  return { action, confidence, price, stop, target, atr: atrValue, rsi, macdHist: macdData.hist, trend: trendUp ? "up" : trendDown ? "down" : "mixed", pattern: pattern?.name || "", reasons };
 }
 
 function calcRSI(values, period = 14) {
@@ -290,8 +370,91 @@ function calcRSI(values, period = 14) {
 }
 
 function sma(values, period) {
+  if (!values.length) return 0;
   const slice = values.slice(-period);
   return slice.reduce((a, b) => a + b, 0) / slice.length;
+}
+
+function calcMACD(values) {
+  const ema12 = emaSeries(values, 12);
+  const ema26 = emaSeries(values, 26);
+  const macdLine = values.map((_, i) => (ema12[i] || values[i]) - (ema26[i] || values[i]));
+  const signal = emaSeries(macdLine, 9);
+  const hist = last(macdLine) - last(signal);
+  const prevHist = macdLine[macdLine.length - 2] - signal[signal.length - 2];
+  return { hist, prevHist: Number.isFinite(prevHist) ? prevHist : hist };
+}
+
+function emaSeries(values, period) {
+  if (!values.length) return [];
+  const k = 2 / (period + 1);
+  const out = [];
+  let ema = values[0];
+  for (const value of values) {
+    ema = value * k + ema * (1 - k);
+    out.push(ema);
+  }
+  return out;
+}
+
+function calcATR(bars, period = 14) {
+  if (bars.length < period + 1) return 0;
+  const trs = [];
+  for (let i = 1; i < bars.length; i++) {
+    const prevClose = bars[i - 1].c;
+    trs.push(Math.max(bars[i].h - bars[i].l, Math.abs(bars[i].h - prevClose), Math.abs(bars[i].l - prevClose)));
+  }
+  return sma(trs.slice(-period), period);
+}
+
+function calcBollinger(values, period = 20) {
+  const slice = values.slice(-period);
+  const mid = sma(slice, slice.length);
+  const variance = slice.reduce((sum, value) => sum + Math.pow(value - mid, 2), 0) / Math.max(slice.length, 1);
+  const sd = Math.sqrt(variance);
+  return { upper: mid + sd * 2, lower: mid - sd * 2, widthPct: mid ? (sd * 4 / mid) * 100 : 0 };
+}
+
+function calcVWAP(bars) {
+  let pv = 0;
+  let vol = 0;
+  for (const bar of bars) {
+    const typical = (bar.h + bar.l + bar.c) / 3;
+    pv += typical * bar.v;
+    vol += bar.v;
+  }
+  return vol ? pv / vol : latestBarPrice(bars);
+}
+
+function candlePattern(bars) {
+  if (bars.length < 3) return null;
+  const a = bars[bars.length - 3];
+  const b = bars[bars.length - 2];
+  const c = bars[bars.length - 1];
+  const body = Math.abs(c.c - c.o);
+  const range = Math.max(c.h - c.l, 0.0001);
+  const upper = c.h - Math.max(c.o, c.c);
+  const lower = Math.min(c.o, c.c) - c.l;
+  const prevBody = Math.abs(b.c - b.o);
+  if (c.c > c.o && b.c < b.o && c.c > b.o && c.o < b.c) return { name: "Bullish engulfing", bullish: true, weight: 12 };
+  if (c.c < c.o && b.c > b.o && c.o > b.c && c.c < b.o) return { name: "Bearish engulfing", bearish: true, weight: 12 };
+  if (lower > body * 2 && upper < body && c.c > c.o) return { name: "Hammer reversal", bullish: true, weight: 8 };
+  if (upper > body * 2 && lower < body && c.c < c.o) return { name: "Shooting star", bearish: true, weight: 8 };
+  if (body / range < 0.12) return { name: "Doji indecision", bearish: true, weight: 4 };
+  if (a.c < a.o && b.c > b.o && c.c > c.o && c.c > a.o && prevBody > 0) return { name: "Morning-star style reversal", bullish: true, weight: 10 };
+  return null;
+}
+
+function latestBarPrice(bars) {
+  return Array.isArray(bars) && bars.length ? bars[bars.length - 1].c : 0;
+}
+
+function last(values) {
+  return values[values.length - 1] || 0;
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
 }
 
 async function statusText() {
@@ -304,6 +467,7 @@ async function statusText() {
     `Open positions: ${positions.length}/${CFG.maxPositions}`,
     `Watchlist: ${CFG.watchlist.join(", ")}`,
     `Risk/trade: ${CFG.riskPct}%`,
+    `Strategy: ${CFG.timeframe} candles, min confidence ${CFG.minConfidence}%`,
     `Last trade: ${lastTradeAt ? new Date(lastTradeAt).toLocaleString() : "none"}`
   ].join("\n");
 }
@@ -325,7 +489,9 @@ async function closeAllPositions() {
   return sendMessage("Close-all request sent. Auto-trading is now OFF.");
 }
 
-async function submitBracketBuy(symbol, qty, price) {
+async function submitBracketBuy(symbol, qty, price, plan = null) {
+  const stop = plan?.stop ?? roundPrice(price * (1 - CFG.stopPct / 100));
+  const target = plan?.target ?? roundPrice(price * (1 + CFG.takeProfitPct / 100));
   const body = {
     symbol,
     qty: String(qty),
@@ -333,8 +499,8 @@ async function submitBracketBuy(symbol, qty, price) {
     type: "market",
     time_in_force: "day",
     order_class: "bracket",
-    take_profit: { limit_price: roundPrice(price * (1 + CFG.takeProfitPct / 100)) },
-    stop_loss: { stop_price: roundPrice(price * (1 - CFG.stopPct / 100)) }
+    take_profit: { limit_price: target },
+    stop_loss: { stop_price: stop }
   };
   return alpaca("/v2/orders", { method: "POST", body });
 }
@@ -355,6 +521,28 @@ async function fetchSnapshots(symbols) {
   const qs = encodeURIComponent(symbols.join(","));
   const data = await alpacaData(`/v2/stocks/snapshots?symbols=${qs}&feed=iex`);
   return data.snapshots || data;
+}
+
+async function fetchBars(symbol, timeframe = "5Min", limit = 160) {
+  const qs = new URLSearchParams({
+    symbols: symbol,
+    timeframe,
+    limit: String(limit),
+    feed: "iex",
+    adjustment: "raw"
+  });
+  const data = await alpacaData(`/v2/stocks/bars?${qs.toString()}`);
+  return (data.bars?.[symbol] || []).map(normalizeBar).filter(Boolean);
+}
+
+function normalizeBar(bar) {
+  const o = Number(bar.o);
+  const h = Number(bar.h);
+  const l = Number(bar.l);
+  const c = Number(bar.c);
+  const v = Number(bar.v || 0);
+  if (![o, h, l, c].every(Number.isFinite)) return null;
+  return { o, h, l, c, v };
 }
 
 function snapshotPrice(snapshot) {

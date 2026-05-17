@@ -103,6 +103,8 @@ Then message your Telegram bot:
 - `/stop_trading` or `/auto_off` - stop opening new paper trades
 - `/scan_now` - scan the watchlist right now
 - `/paper_buy AAPL` - manually open a risk-sized paper bracket buy
+- `/explain AAPL` - show the candle/indicator readout
+- `/strategy` - show current strategy settings
 - `/status`
 - `/positions`
 - `/close_all`
@@ -118,9 +120,12 @@ Automation works like this:
 
 1. You send `/start_trading` or `/auto_on` in Telegram.
 2. The Worker scans immediately, then every 5 minutes through Cloudflare Cron.
-3. If the simple RSI/SMA rule says `BUY`, the bot submits an Alpaca Paper bracket buy with stop loss and take profit.
-4. Risk guards block new orders when max daily loss, max positions, duplicate positions, cooldowns, or invalid sizing applies.
-5. You can stop new orders with `/stop_trading` or close paper positions with `/close_all`.
+3. The bot reads recent Alpaca candle bars and scores EMA trend, RSI, MACD, Bollinger Bands, VWAP, volume, ATR volatility, support/resistance, and candlestick patterns.
+4. If confidence clears the configured threshold, the bot submits an Alpaca Paper bracket buy with ATR-aware stop loss and take profit.
+5. Risk guards block new orders when max daily loss, max positions, duplicate positions, cooldowns, or invalid sizing applies.
+6. You can stop new orders with `/stop_trading` or close paper positions with `/close_all`.
+
+This strategy is more advanced than a single indicator rule, but it is not a guarantee. Alpaca free stock data commonly uses IEX market data, so it may differ from full-market SIP feeds and TradingView. Use `/explain AAPL` to see why the bot is holding or trading.
 
 ## Privacy Model
 
