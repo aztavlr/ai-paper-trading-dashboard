@@ -27,12 +27,16 @@ If Cloudflare asks for Python Worker tooling, follow Cloudflare's Python Worker 
 - `/auto_off` or `/stop_trading`
 - `/scan_now`
 - `/paper_buy AAPL`
+- `/force_buy AAPL`
 - `/explain AAPL`
 - `/ai AAPL`
 - `/strategy`
+- `/settings`
+- `/set confidence 78`
 - `/status`
 - `/positions`
 - `/close_all`
+- `/cancel_orders`
 - `/watch AAPL TSLA SPY`
 - `/risk 1`
 - `/test`
@@ -45,9 +49,12 @@ The Python Worker uses:
 - EMA trend alignment
 - RSI, MACD, Bollinger position, VWAP, volume, ATR, support/resistance, and candlestick patterns
 - Risk/reward filtering
+- Fixed take-profit percent and R-multiple targets
 - Max position value cap
+- Buying-power-aware position sizing
 - Open-order checks so queued orders count against position slots
 - Market-open guard so automation does not queue surprise next-session orders
+- Safer `/paper_buy` behavior; use `/force_buy` only for intentional paper tests
 - Daily loss baseline stored in Supabase
 
 ## Free Built-In Review

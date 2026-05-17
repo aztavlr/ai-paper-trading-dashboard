@@ -29,6 +29,20 @@ DEFAULTS = {
 
 ALPACA_PAPER_API = "https://paper-api.alpaca.markets"
 ALPACA_DATA_API = "https://data.alpaca.markets"
+TELEGRAM_MAX_LENGTH = 3900
+
+SETTING_ALIASES = {
+    "risk": ("RISK_PER_TRADE_PCT", 0.1, 5, "%"),
+    "confidence": ("MIN_CONFIDENCE", 50, 95, "%"),
+    "rr": ("MIN_RISK_REWARD", 0.5, 5, "R"),
+    "stop": ("STOP_LOSS_PCT", 0.25, 15, "%"),
+    "take_profit": ("TAKE_PROFIT_PCT", 0.5, 40, "%"),
+    "max_positions": ("MAX_OPEN_POSITIONS", 1, 10, ""),
+    "max_position_value": ("MAX_POSITION_VALUE_PCT", 1, 100, "%"),
+    "cooldown": ("COOLDOWN_MINUTES", 1, 1440, " minutes"),
+    "atr_stop": ("ATR_STOP_MULTIPLIER", 0.5, 5, "x"),
+    "take_profit_r": ("TAKE_PROFIT_R_MULTIPLIER", 0.5, 8, "R"),
+}
 
 
 def to_js(obj):
@@ -93,12 +107,22 @@ def normalize_symbol(value):
 async def send_message(env, text, chat_id=None):
     token = env_value(env, "TELEGRAM_BOT_TOKEN")
     target = chat_id or env_value(env, "TELEGRAM_ALLOWED_CHAT_ID")
+    safe_text = str(text or "")
+    if len(safe_text) > TELEGRAM_MAX_LENGTH:
+        safe_text = safe_text[: TELEGRAM_MAX_LENGTH - 80].rstrip() + "\n\n[message trimmed]"
     return await request_json(
         f"https://api.telegram.org/bot{token}/sendMessage",
         method="POST",
         headers={"content-type": "application/json"},
-        body={"chat_id": target, "text": text, "disable_web_page_preview": True},
+        body={"chat_id": target, "text": safe_text, "disable_web_page_preview": True},
     )
+
+
+async def safe_send_message(env, text, chat_id=None):
+    try:
+        return await send_message(env, text, chat_id)
+    except Exception:
+        return None
 
 
 def alpaca_headers(env):
@@ -216,6 +240,10 @@ async def fetch_positions(env):
 async def fetch_open_orders(env):
     data = await alpaca(env, "/v2/orders?status=open&limit=100")
     return data if isinstance(data, list) else []
+
+
+async def cancel_open_orders(env):
+    return await alpaca(env, "/v2/orders", method="DELETE")
 
 
 async def fetch_clock(env):
@@ -393,7 +421,8 @@ def analyze_bars(bars, risk):
     confidence = max(1, min(96, round(score)))
     stop_distance = max(atr * risk["atr_stop_multiplier"], price * risk["stop_pct"] / 100)
     stop = round_price(price - stop_distance)
-    target = round_price(price + stop_distance * risk["take_profit_r"])
+    target_distance = max(stop_distance * risk["take_profit_r"], price * risk["take_profit_pct"] / 100)
+    target = round_price(price + target_distance)
     rr = (target - price) / max(price - stop, 0.0001)
     volatility_pct = (atr / price) * 100 if price else 0
     action = "BUY" if confidence >= risk["min_confidence"] and not trend_down and rr >= risk["min_rr"] else "HOLD"
@@ -450,14 +479,17 @@ async def analyze_symbol(env, symbol, risk):
     return analysis
 
 
-def position_size(equity, price, risk, stop_price=None):
+def position_size(equity, price, risk, stop_price=None, buying_power=None):
     if price <= 0:
         return 0
     risk_dollars = equity * risk["risk_pct"] / 100
     risk_per_share = abs(price - stop_price) if stop_price else price * risk["stop_pct"] / 100
     risk_qty = math.floor(risk_dollars / max(risk_per_share, 0.01))
     max_value_qty = math.floor((equity * risk["max_position_value_pct"] / 100) / price)
-    return max(0, min(risk_qty, max_value_qty))
+    caps = [risk_qty, max_value_qty]
+    if buying_power is not None:
+        caps.append(math.floor((float(buying_power) * 0.95) / price))
+    return max(0, min(caps))
 
 
 def now_ms():
@@ -557,25 +589,6 @@ def strategy_text(risk):
     ])
 
 
-def compact_analysis(analysis):
-    return {
-        "action": analysis.get("action"),
-        "confidence": analysis.get("confidence"),
-        "price": round_price(float(analysis.get("price") or 0)),
-        "stop": analysis.get("stop"),
-        "target": analysis.get("target"),
-        "risk_reward": round(float(analysis.get("rr") or 0), 2),
-        "trend": analysis.get("trend"),
-        "rsi": round(float(analysis.get("rsi") or 0), 1),
-        "macd_hist": round(float(analysis.get("macd_hist") or 0), 4),
-        "atr": round_price(float(analysis.get("atr") or 0)),
-        "volatility_pct": round(float(analysis.get("volatility_pct") or 0), 2),
-        "pattern": analysis.get("pattern") or "none",
-        "higher_timeframe": analysis.get("higher_timeframe"),
-        "reasons": analysis.get("reasons", [])[-8:],
-    }
-
-
 def built_in_ai_review(symbol, analysis, risk, positions):
     confidence = float(analysis.get("confidence") or 0)
     rr = float(analysis.get("rr") or 0)
@@ -666,13 +679,14 @@ async def ai_symbol(env, raw_symbol):
     return await send_message(env, f"Built-in paper-trading review for {symbol}\n\n{ai_text}")
 
 
-async def manual_paper_buy(env, raw_symbol):
+async def manual_paper_buy(env, raw_symbol, force=False):
     symbol = normalize_symbol(raw_symbol)
     if not symbol:
         return await send_message(env, "Usage: /paper_buy AAPL")
     risk = await get_risk(env)
     account = await fetch_account(env)
     equity = float(account.get("equity") or account.get("portfolio_value") or 0)
+    buying_power = float(account.get("buying_power") or 0)
     daily_blocked, daily_loss, baseline = await daily_loss_guard(env, account, risk)
     if daily_blocked:
         return await send_message(env, f"Risk guard blocked {symbol}: daily loss limit hit ({money(daily_loss)} from {money(baseline)} baseline).")
@@ -687,13 +701,21 @@ async def manual_paper_buy(env, raw_symbol):
     analysis = await analyze_symbol(env, symbol, risk)
     if analysis.get("action") == "WARMUP" or not analysis.get("price") or not analysis.get("stop") or not analysis.get("target"):
         return await send_message(env, f"Risk guard blocked {symbol}: not enough clean candle data for a bracket order.")
-    qty = position_size(equity, analysis["price"], risk, analysis.get("stop"))
+    if analysis.get("action") != "BUY" and not force:
+        return await send_message(env, "\n".join([
+            f"Paper buy blocked for {symbol}: signal is {analysis.get('action')} at {analysis.get('confidence', 0)}%.",
+            f"Required confidence: {risk['min_confidence']}% | R/R: {analysis.get('rr', 0):.2f}R",
+            "Use /explain first, or /force_buy SYMBOL only if you intentionally want a risk-sized paper test.",
+        ]))
+    qty = position_size(equity, analysis["price"], risk, analysis.get("stop"), buying_power)
     if qty < 1:
         return await send_message(env, f"Risk sizing blocked {symbol}: quantity below 1 share.")
     order = await submit_bracket_buy(env, symbol, qty, analysis)
     await set_cooldown(env, symbol, risk)
-    await log_event(env, "manual_python_order", {"symbol": symbol, "qty": qty, "analysis": analysis}, symbol)
-    return await send_message(env, f"Manual paper BUY submitted: {symbol}\nConfidence: {analysis['confidence']}%\nQty: {qty}\nEntry ref: {money(analysis['price'])}\nStop: {money(analysis['stop'])}\nTarget: {money(analysis['target'])}\nWhy: {'; '.join(analysis['reasons'][:4])}\nOrder: {order.get('id', 'submitted')}")
+    event_type = "force_python_order" if force else "manual_python_order"
+    await log_event(env, event_type, {"symbol": symbol, "qty": qty, "analysis": analysis}, symbol)
+    force_note = "FORCED paper BUY submitted" if force else "Manual paper BUY submitted"
+    return await send_message(env, f"{force_note}: {symbol}\nConfidence: {analysis['confidence']}%\nQty: {qty}\nEntry ref: {money(analysis['price'])}\nStop: {money(analysis['stop'])}\nTarget: {money(analysis['target'])}\nWhy: {'; '.join(analysis['reasons'][:4])}\nOrder: {order.get('id', 'submitted')}")
 
 
 async def trade_loop(env, notify=False):
@@ -703,6 +725,7 @@ async def trade_loop(env, notify=False):
     risk = await get_risk(env)
     account = await fetch_account(env)
     equity = float(account.get("equity") or account.get("portfolio_value") or 0)
+    buying_power = float(account.get("buying_power") or 0)
     daily_blocked, daily_loss, baseline = await daily_loss_guard(env, account, risk)
     if daily_blocked:
         await state_put(env, "RUNNING", "false")
@@ -740,7 +763,7 @@ async def trade_loop(env, notify=False):
         if not running:
             summary["blocked"] += 1
             continue
-        qty = position_size(equity, analysis["price"], risk, analysis["stop"])
+        qty = position_size(equity, analysis["price"], risk, analysis["stop"], buying_power)
         if qty < 1:
             summary["blocked"] += 1
             continue
@@ -786,15 +809,32 @@ async def positions_text(env):
 
 async def close_all_positions(env):
     positions = await fetch_positions(env)
+    open_orders = await fetch_open_orders(env)
     if not positions:
+        if open_orders:
+            await cancel_open_orders(env)
+            await state_put(env, "RUNNING", "false")
+            return await send_message(env, f"Canceled {len(open_orders)} open paper orders. Auto-trading is now OFF.")
         return await send_message(env, "No open paper positions to close.")
+    if open_orders:
+        await cancel_open_orders(env)
     await alpaca(env, "/v2/positions", method="DELETE")
     await state_put(env, "RUNNING", "false")
-    return await send_message(env, "Close-all request sent. Auto-trading is now OFF.")
+    return await send_message(env, f"Close-all request sent for {len(positions)} positions and {len(open_orders)} open orders. Auto-trading is now OFF.")
+
+
+async def cancel_orders_command(env):
+    open_orders = await fetch_open_orders(env)
+    if not open_orders:
+        return await send_message(env, "No open paper orders to cancel.")
+    await cancel_open_orders(env)
+    return await send_message(env, f"Canceled {len(open_orders)} open paper orders.")
 
 
 async def update_watchlist(env, symbols):
-    next_symbols = [normalize_symbol(s) for s in symbols]
+    raw = " ".join(symbols)
+    pieces = re.split(r"[\s,]+", raw.strip())
+    next_symbols = [normalize_symbol(s) for s in pieces]
     next_symbols = [s for s in next_symbols if s][:12]
     if not next_symbols:
         return await send_message(env, f"Current watchlist: {', '.join(await get_watchlist(env))}")
@@ -813,6 +853,64 @@ async def update_risk(env, value):
     return await send_message(env, f"Risk per paper trade set to {risk}%.")
 
 
+async def update_setting(env, key, value):
+    alias = str(key or "").lower().strip()
+    if alias in {"market", "market_guard", "market_open"}:
+        if str(value).lower() not in {"on", "off", "true", "false", "1", "0"}:
+            return await send_message(env, "Use /set market_guard on or /set market_guard off")
+        enabled = as_bool(value)
+        await state_put(env, "MARKET_OPEN_ONLY", "true" if enabled else "false")
+        return await send_message(env, f"Market-open guard set to {'ON' if enabled else 'OFF'}.")
+    if alias in {"timeframe", "tf"}:
+        allowed = {"1min": "1Min", "5min": "5Min", "15min": "15Min", "30min": "30Min", "1hour": "1Hour", "1day": "1Day"}
+        candidate = allowed.get(str(value or "").strip().lower())
+        if not candidate:
+            return await send_message(env, f"Allowed timeframes: {', '.join(allowed.values())}")
+        await state_put(env, "BAR_TIMEFRAME", candidate)
+        return await send_message(env, f"Primary timeframe set to {candidate}.")
+    if alias in {"higher_timeframe", "htf"}:
+        allowed = {"5min": "5Min", "15min": "15Min", "30min": "30Min", "1hour": "1Hour", "1day": "1Day"}
+        candidate = allowed.get(str(value or "").strip().lower())
+        if not candidate:
+            return await send_message(env, f"Allowed higher timeframes: {', '.join(allowed.values())}")
+        await state_put(env, "HIGHER_TIMEFRAME", candidate)
+        return await send_message(env, f"Higher timeframe set to {candidate}.")
+    if alias not in SETTING_ALIASES:
+        return await send_message(env, "Unknown setting. Try /settings to see editable names.")
+    setting_key, min_value, max_value, suffix = SETTING_ALIASES[alias]
+    try:
+        number = float(value)
+    except Exception:
+        number = math.nan
+    if not math.isfinite(number):
+        return await send_message(env, f"Use /set {alias} NUMBER")
+    number = max(min_value, min(max_value, number))
+    stored = int(number) if setting_key == "MAX_OPEN_POSITIONS" else round(number, 4)
+    await state_put(env, setting_key, str(stored))
+    return await send_message(env, f"{alias} set to {stored}{suffix}.")
+
+
+async def settings_text(env):
+    risk = await get_risk(env)
+    return "\n".join([
+        "Editable paper bot settings:",
+        f"risk: {risk['risk_pct']}%",
+        f"confidence: {risk['min_confidence']}%",
+        f"rr: {risk['min_rr']:.2f}R",
+        f"stop: {risk['stop_pct']}%",
+        f"take_profit: {risk['take_profit_pct']}%",
+        f"max_positions: {risk['max_positions']}",
+        f"max_position_value: {risk['max_position_value_pct']}%",
+        f"cooldown: {risk['cooldown_minutes']:.0f} minutes",
+        f"atr_stop: {risk['atr_stop_multiplier']}x",
+        f"take_profit_r: {risk['take_profit_r']}R",
+        f"timeframe: {risk['timeframe']}",
+        f"higher_timeframe: {risk['higher_timeframe']}",
+        f"market_guard: {'on' if risk['market_open_only'] else 'off'}",
+        "Example: /set confidence 78",
+    ])
+
+
 def help_text():
     return "\n".join([
         "Python Worker commands:",
@@ -820,12 +918,16 @@ def help_text():
         "/auto_off or /stop_trading - stop new paper orders",
         "/scan_now - scan now",
         "/paper_buy AAPL - manual risk-sized bracket buy",
+        "/force_buy AAPL - force a risk-sized paper test",
         "/explain AAPL - explain candle/indicator readout",
         "/ai AAPL - free built-in paper-trading review",
         "/strategy - show strategy settings",
+        "/settings - show editable settings",
+        "/set confidence 78 - edit a setting",
         "/status - show account/bot status",
         "/positions - show positions",
         "/close_all - close paper positions",
+        "/cancel_orders - cancel open paper orders",
         "/watch AAPL TSLA SPY - replace watchlist",
         "/risk 1 - set risk percent",
         "/test - test Alpaca Paper API",
@@ -849,18 +951,26 @@ async def handle_command(env, text):
         return await trade_loop(env, True)
     if cmd in {"/paper_buy", "/buy"}:
         return await manual_paper_buy(env, rest[0] if rest else "")
+    if cmd == "/force_buy":
+        return await manual_paper_buy(env, rest[0] if rest else "", True)
     if cmd == "/explain":
         return await explain_symbol(env, rest[0] if rest else "")
     if cmd in {"/ai", "/review"}:
         return await ai_symbol(env, rest[0] if rest else "")
     if cmd == "/strategy":
         return await send_message(env, strategy_text(await get_risk(env)))
+    if cmd == "/settings":
+        return await send_message(env, await settings_text(env))
+    if cmd == "/set":
+        return await update_setting(env, rest[0] if len(rest) > 0 else "", rest[1] if len(rest) > 1 else "")
     if cmd == "/status":
         return await send_message(env, await status_text(env))
     if cmd == "/positions":
         return await send_message(env, await positions_text(env))
     if cmd == "/close_all":
         return await close_all_positions(env)
+    if cmd == "/cancel_orders":
+        return await cancel_orders_command(env)
     if cmd == "/watch":
         return await update_watchlist(env, rest)
     if cmd == "/risk":
@@ -869,6 +979,14 @@ async def handle_command(env, text):
         await fetch_account(env)
         return await send_message(env, "Alpaca Paper API connection works from Python Worker.")
     return await send_message(env, f"Unknown command.\n\n{help_text()}")
+
+
+async def scheduled_trade_loop(env):
+    try:
+        await trade_loop(env, False)
+    except Exception as exc:
+        await log_event(env, "python_scheduled_error", {"message": str(exc)})
+        await safe_send_message(env, f"Scheduled scan warning: {exc}")
 
 
 class Default(WorkerEntrypoint):
@@ -903,8 +1021,8 @@ class Default(WorkerEntrypoint):
             await handle_command(self.env, text.strip())
         except Exception as exc:
             await log_event(self.env, "python_worker_error", {"message": str(exc)})
-            await send_message(self.env, f"Python Worker warning: {exc}")
+            await safe_send_message(self.env, f"Python Worker warning: {exc}")
         return Response("ok")
 
     async def scheduled(self, controller, env, ctx):
-        ctx.waitUntil(trade_loop(env, False))
+        ctx.waitUntil(scheduled_trade_loop(env))
