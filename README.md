@@ -20,3 +20,9 @@ Open `index.html` in a browser.
 ## Safety Note
 
 This is an educational paper trading simulator. It does not connect to a broker, place real trades, or guarantee trading results.
+
+## Privacy
+
+The app is static and runs in the browser. It does not store user data on a project server. API keys are session-only by default, and users must explicitly opt in before an AI key is remembered on their own device.
+
+See `PRIVACY.md` for details.

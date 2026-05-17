@@ -354,13 +354,17 @@
         <a href="https://console.anthropic.com/keys" target="_blank" style="font-size:12px;color:var(--blue);text-decoration:none">Get key</a>
       </div>
       <div class="api-grid">
-        <div class="field"><label>API Key</label><input type="password" id="api-key" placeholder="sk-ant-api03-..." oninput="saveKey()"></div>
+        <div class="field"><label>API Key</label><input type="password" id="api-key" placeholder="sk-ant-api03-..." oninput="handleKeyInput()"></div>
         <button class="primary" onclick="testApiKey()">Verify key</button>
-        <button onclick="clearSavedKey()">Clear saved key</button>
+        <button onclick="clearSavedKey()">Clear key</button>
       </div>
+      <label class="check-row" style="height:auto;margin-top:10px">
+        <input id="remember-key" type="checkbox" onchange="handleRememberChoice()">
+        Remember AI key on this device
+      </label>
       <div id="api-status" class="status-line"></div>
       <div style="margin-top:8px;font-size:12px;color:var(--text3);line-height:1.6">
-        Browser-only demo: the key is stored in this browser's local storage and sent directly to Anthropic only when you use AI chat.
+        Privacy-first mode: keys stay in this browser. The AI key is not saved unless you tick remember, and it is sent only to Anthropic when you use AI chat.
       </div>
     </div>
 
@@ -387,6 +391,16 @@
         <strong>Step 1</strong> - Open Telegram, search <code>@BotFather</code>, send <code>/newbot</code>, and copy the token.<br><br>
         <strong>Step 2</strong> - Send your bot a message. Then open <code>https://api.telegram.org/bot&lt;YOUR_TOKEN&gt;/getUpdates</code> and copy the chat id.<br><br>
         <strong>Step 3</strong> - Paste the token and chat id above, then send a test alert.
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:14px;border-color:rgba(74,222,128,.22)">
+      <div class="card-title">
+        <span>Privacy & Security</span>
+        <span class="subtle">No server storage</span>
+      </div>
+      <div class="summary-box">
+        This site runs in your browser. Simulated trades, watchlist data, Telegram fields, and API keys are not uploaded to this GitHub repo. Telegram messages go only to Telegram when you send or enable alerts. AI chat text goes only to Anthropic when you press Send with an API key.
       </div>
     </div>
   </div>
@@ -1006,20 +1020,50 @@ function toggleGuide() {
 }
 
 function getApiKey() {
-  return document.getElementById('api-key').value.trim() || localStorage.getItem('tb_api_key') || '';
+  return document.getElementById('api-key').value.trim();
 }
 
-function saveKey() {
+function handleKeyInput() {
   const k = document.getElementById('api-key').value.trim();
-  if (k) localStorage.setItem('tb_api_key', k);
+  const remember = document.getElementById('remember-key')?.checked;
+  if (remember && k) {
+    localStorage.setItem('tb_api_key', k);
+    localStorage.setItem('tb_api_key_remembered', 'true');
+  }
+  if (remember && !k) {
+    localStorage.removeItem('tb_api_key');
+    localStorage.removeItem('tb_api_key_remembered');
+  }
+  if (!remember) {
+    localStorage.removeItem('tb_api_key');
+    localStorage.removeItem('tb_api_key_remembered');
+  }
   document.getElementById('api-status').textContent = '';
+}
+
+function handleRememberChoice() {
+  const remember = document.getElementById('remember-key').checked;
+  const k = document.getElementById('api-key').value.trim();
+  if (remember && k) {
+    localStorage.setItem('tb_api_key', k);
+    localStorage.setItem('tb_api_key_remembered', 'true');
+    document.getElementById('api-status').style.color = '#fbbf24';
+    document.getElementById('api-status').textContent = 'AI key will be remembered only in this browser.';
+  } else {
+    localStorage.removeItem('tb_api_key');
+    localStorage.removeItem('tb_api_key_remembered');
+    document.getElementById('api-status').style.color = '#9aa1b7';
+    document.getElementById('api-status').textContent = remember ? 'Paste a key to remember it on this device.' : 'AI key will be used for this session only.';
+  }
 }
 
 function clearSavedKey() {
   localStorage.removeItem('tb_api_key');
+  localStorage.removeItem('tb_api_key_remembered');
   document.getElementById('api-key').value = '';
+  document.getElementById('remember-key').checked = false;
   document.getElementById('api-status').style.color = '#9aa1b7';
-  document.getElementById('api-status').textContent = 'Saved key cleared.';
+  document.getElementById('api-status').textContent = 'Key cleared from this page and browser storage.';
 }
 
 async function testApiKey() {
@@ -1042,7 +1086,10 @@ async function testApiKey() {
     if (d.content) {
       s.style.color = '#4ade80';
       s.textContent = 'API key verified. AI chat is ready.';
-      localStorage.setItem('tb_api_key', k);
+      if (document.getElementById('remember-key').checked) {
+        localStorage.setItem('tb_api_key', k);
+        localStorage.setItem('tb_api_key_remembered', 'true');
+      }
     } else {
       s.style.color = '#f87171';
       s.textContent = d.error?.message || 'Invalid key.';
@@ -1144,10 +1191,17 @@ document.querySelectorAll('#risk-per-trade,#stop-loss-pct,#take-profit-pct,#trai
   .forEach(el => el.addEventListener('change', applyRiskSettings));
 
 const savedKey = localStorage.getItem('tb_api_key');
-if (savedKey) {
+const rememberedKey = localStorage.getItem('tb_api_key_remembered') === 'true';
+if (savedKey && rememberedKey) {
+  document.getElementById('remember-key').checked = true;
   document.getElementById('api-key').value = savedKey;
-  document.getElementById('api-status').style.color = '#4ade80';
-  document.getElementById('api-status').textContent = 'API key loaded from last session.';
+  document.getElementById('api-status').style.color = '#fbbf24';
+  document.getElementById('api-status').textContent = 'Remembered AI key loaded from this browser only.';
+} else if (savedKey) {
+  localStorage.removeItem('tb_api_key');
+  localStorage.removeItem('tb_api_key_remembered');
+  document.getElementById('api-status').style.color = '#9aa1b7';
+  document.getElementById('api-status').textContent = 'A previously saved AI key was cleared for privacy. Paste it again if needed.';
 }
 
 syncRiskInputs();
