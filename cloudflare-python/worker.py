@@ -25,12 +25,10 @@ DEFAULTS = {
     "MAX_POSITION_VALUE_PCT": "20",
     "COOLDOWN_MINUTES": "30",
     "MARKET_OPEN_ONLY": "true",
-    "ANTHROPIC_MODEL": "claude-sonnet-4-5",
 }
 
 ALPACA_PAPER_API = "https://paper-api.alpaca.markets"
 ALPACA_DATA_API = "https://data.alpaca.markets"
-ANTHROPIC_API = "https://api.anthropic.com/v1/messages"
 
 
 def to_js(obj):
@@ -554,7 +552,7 @@ def strategy_text(risk):
         f"Take profit: {risk['take_profit_r']}R",
         f"Market-open guard: {'ON' if risk['market_open_only'] else 'OFF'}",
         "Reads: EMA trend, higher-timeframe alignment, RSI, MACD, Bollinger position, VWAP, volume, ATR volatility, support/resistance, and candlestick patterns.",
-        "Optional Claude analyst command: /ai AAPL after ANTHROPIC_API_KEY is saved as a Worker secret.",
+        "Free built-in analyst command: /ai AAPL. No paid AI key required.",
         "Still educational paper trading only. No method is 100% accurate.",
     ])
 
@@ -578,60 +576,57 @@ def compact_analysis(analysis):
     }
 
 
-async def claude_analyst(env, symbol, analysis, risk, positions):
-    api_key = env_value(env, "ANTHROPIC_API_KEY")
-    if not api_key:
-        return "Claude AI is not configured. Add it with: npx.cmd wrangler secret put ANTHROPIC_API_KEY"
-    model = env_value(env, "ANTHROPIC_MODEL") or await get_setting(env, "ANTHROPIC_MODEL")
-    sanitized_positions = [
-        {
-            "symbol": p.get("symbol"),
-            "qty": p.get("qty"),
-            "avg_entry_price": p.get("avg_entry_price"),
-            "unrealized_pl": p.get("unrealized_pl"),
-        }
-        for p in positions[:10]
-    ]
-    prompt = json.dumps(
-        {
-            "symbol": symbol,
-            "paper_trading_only": True,
-            "analysis": compact_analysis(analysis),
-            "risk_settings": risk,
-            "open_positions": sanitized_positions,
-        }
-    )
-    data = await request_json(
-        ANTHROPIC_API,
-        method="POST",
-        headers={
-            "content-type": "application/json",
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-        },
-        body={
-            "model": model,
-            "max_tokens": 500,
-            "system": (
-                "You are a cautious paper-trading risk analyst. Be concise. "
-                "Do not give financial advice, do not promise accuracy, and do not tell the user to use real money. "
-                "Explain whether the setup is strong, weak, or blocked using the provided indicators and risk settings."
-            ),
-            "messages": [
-                {
-                    "role": "user",
-                    "content": (
-                        "Review this paper-trading setup. Return: verdict, best evidence, main risk, "
-                        "what would invalidate it, and one educational next step.\n\n"
-                        f"{prompt}"
-                    ),
-                }
-            ],
-        },
-    )
-    parts = data.get("content", []) if isinstance(data, dict) else []
-    text = "\n".join(str(part.get("text", "")) for part in parts if isinstance(part, dict) and part.get("type") == "text")
-    return text.strip() or "Claude returned an empty response."
+def built_in_ai_review(symbol, analysis, risk, positions):
+    confidence = float(analysis.get("confidence") or 0)
+    rr = float(analysis.get("rr") or 0)
+    trend = analysis.get("trend") or "unknown"
+    htf = analysis.get("higher_timeframe") or {}
+    htf_trend = htf.get("trend") or htf.get("status") or "unknown"
+    volatility = float(analysis.get("volatility_pct") or 0)
+    reasons = analysis.get("reasons") or []
+    position_symbols = {str(p.get("symbol") or "").upper() for p in positions}
+
+    if analysis.get("action") == "BUY":
+        verdict = "Strong paper setup, but still not a prediction."
+    elif confidence >= risk["min_confidence"] - 8 and rr >= risk["min_rr"]:
+        verdict = "Close watchlist setup. It is near the rules, but not clean enough yet."
+    else:
+        verdict = "Weak or blocked setup. The risk rules are doing their job."
+
+    risks = []
+    if symbol in position_symbols:
+        risks.append("A position is already open for this symbol.")
+    if confidence < risk["min_confidence"]:
+        risks.append(f"Confidence {confidence:.0f}% is below the {risk['min_confidence']:.0f}% rule.")
+    if rr < risk["min_rr"]:
+        risks.append(f"Risk/reward {rr:.2f}R is below the {risk['min_rr']:.1f}R rule.")
+    if trend == "down" or htf_trend == "down":
+        risks.append("Trend alignment is bearish on at least one timeframe.")
+    if volatility > 6:
+        risks.append("ATR volatility is elevated, so stops may get hit more easily.")
+    if not risks:
+        risks.append("The main risk is a false breakout or fast reversal after entry.")
+
+    invalidation = []
+    if trend == "up":
+        invalidation.append("EMA trend flips mixed/down.")
+    if htf_trend == "up":
+        invalidation.append("Higher timeframe loses bullish confirmation.")
+    invalidation.append("Price breaks the planned stop.")
+    invalidation.append("Volume confirmation disappears.")
+
+    best_evidence = "; ".join(reasons[:4]) if reasons else "No strong technical evidence yet."
+    return "\n".join([
+        f"Verdict: {verdict}",
+        f"Action: {analysis.get('action')} | Confidence: {confidence:.0f}% | R/R: {rr:.2f}R",
+        f"Trend: {trend} | Higher TF: {htf_trend}",
+        f"Entry ref: {money(float(analysis.get('price') or 0))}",
+        f"Stop: {money(float(analysis.get('stop') or 0))} | Target: {money(float(analysis.get('target') or 0))}",
+        f"Best evidence: {best_evidence}",
+        f"Main risk: {' '.join(risks[:3])}",
+        f"Invalidation: {' '.join(invalidation[:3])}",
+        "Educational next step: compare this setup against the last 20 similar signals before trusting automation.",
+    ])
 
 
 async def explain_symbol(env, raw_symbol):
@@ -667,8 +662,8 @@ async def ai_symbol(env, raw_symbol):
     if not analysis.get("price"):
         return await send_message(env, f"No candle data available for {symbol}.")
     positions = await fetch_positions(env)
-    ai_text = await claude_analyst(env, symbol, analysis, risk, positions)
-    return await send_message(env, f"Claude paper-trading review for {symbol}\n\n{ai_text}")
+    ai_text = built_in_ai_review(symbol, analysis, risk, positions)
+    return await send_message(env, f"Built-in paper-trading review for {symbol}\n\n{ai_text}")
 
 
 async def manual_paper_buy(env, raw_symbol):
@@ -826,7 +821,7 @@ def help_text():
         "/scan_now - scan now",
         "/paper_buy AAPL - manual risk-sized bracket buy",
         "/explain AAPL - explain candle/indicator readout",
-        "/ai AAPL - optional Claude paper-trading review",
+        "/ai AAPL - free built-in paper-trading review",
         "/strategy - show strategy settings",
         "/status - show account/bot status",
         "/positions - show positions",
@@ -856,7 +851,7 @@ async def handle_command(env, text):
         return await manual_paper_buy(env, rest[0] if rest else "")
     if cmd == "/explain":
         return await explain_symbol(env, rest[0] if rest else "")
-    if cmd in {"/ai", "/claude"}:
+    if cmd in {"/ai", "/review"}:
         return await ai_symbol(env, rest[0] if rest else "")
     if cmd == "/strategy":
         return await send_message(env, strategy_text(await get_risk(env)))

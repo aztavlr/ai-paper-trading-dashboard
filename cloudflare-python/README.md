@@ -50,22 +50,9 @@ The Python Worker uses:
 - Market-open guard so automation does not queue surprise next-session orders
 - Daily loss baseline stored in Supabase
 
-## Optional Claude AI Review
+## Free Built-In Review
 
-The bot can call Claude for an educational paper-trading review with `/ai AAPL`. This does not make trades by itself; it only explains the setup and risks.
-
-Save your Anthropic API key as a Cloudflare Worker secret:
-
-```powershell
-cd "C:\Users\Danny\Documents\Codex\2026-05-17\files-mentioned-by-the-user-telegram\cloudflare-python"
-npx.cmd wrangler secret put ANTHROPIC_API_KEY
-```
-
-Optional model override:
-
-```powershell
-npx.cmd wrangler secret put ANTHROPIC_MODEL
-```
+The bot includes a free `/ai AAPL` review command that runs inside the Worker. It does not call Claude, OpenAI, or any paid external model. It summarizes the setup, main risk, invalidation level, and educational next step from the bot's own indicator engine.
 
 ## Rollback
 
