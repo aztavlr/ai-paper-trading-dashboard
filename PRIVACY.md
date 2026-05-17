@@ -27,3 +27,7 @@ Remembered values are not uploaded to GitHub or to a project server. They can st
 ## Repository Safety
 
 Do not commit API keys, bot tokens, account numbers, secrets, screenshots containing keys, or broker credentials.
+
+## Telegram Command Bot
+
+The optional always-on Telegram command bot uses `bot/.env` for secrets. That file is ignored by Git and should stay only on the trusted device or server running the bot.
