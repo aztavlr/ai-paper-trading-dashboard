@@ -72,6 +72,21 @@ CRYPTO_ALIASES = {
     "AAVE": "AAVE/USD",
 }
 
+TRADINGVIEW_EXCHANGE_OVERRIDES = {
+    "SPY": "AMEX:SPY",
+    "QQQ": "NASDAQ:QQQ",
+    "DIA": "AMEX:DIA",
+    "IWM": "AMEX:IWM",
+    "AAPL": "NASDAQ:AAPL",
+    "TSLA": "NASDAQ:TSLA",
+    "NVDA": "NASDAQ:NVDA",
+    "MSFT": "NASDAQ:MSFT",
+    "GOOGL": "NASDAQ:GOOGL",
+    "GOOG": "NASDAQ:GOOG",
+    "META": "NASDAQ:META",
+    "AMZN": "NASDAQ:AMZN",
+}
+
 
 def to_js(obj):
     return _to_js(obj, dict_converter=Object.fromEntries)
@@ -360,7 +375,8 @@ async def validate_crypto_price(symbol, alpaca_price, risk):
 def tradingview_url(symbol):
     if is_crypto_symbol(symbol):
         return f"https://www.tradingview.com/chart/?symbol=COINBASE:{str(symbol).replace('/', '')}"
-    return f"https://www.tradingview.com/chart/?symbol=NASDAQ:{symbol}"
+    tv_symbol = TRADINGVIEW_EXCHANGE_OVERRIDES.get(str(symbol).upper(), f"NASDAQ:{symbol}")
+    return f"https://www.tradingview.com/chart/?symbol={tv_symbol}"
 
 
 def source_summary(validation):
@@ -546,7 +562,7 @@ def analyze_bars(bars, risk):
     }
 
 
-async def analyze_symbol(env, symbol, risk):
+async def analyze_symbol(env, symbol, risk, validate_data=True):
     primary_limit = FAST_PRIMARY_LIMIT if risk.get("fast_scan", True) else FULL_PRIMARY_LIMIT
     higher_limit = FAST_HIGHER_LIMIT if risk.get("fast_scan", True) else FULL_PRIMARY_LIMIT
     analysis = analyze_bars(await fetch_bars(env, symbol, risk["timeframe"], primary_limit), risk)
@@ -557,14 +573,6 @@ async def analyze_symbol(env, symbol, risk):
     analysis["tradingview_url"] = tradingview_url(symbol)
     if analysis["action"] == "WARMUP" or not analysis.get("price"):
         return analysis
-
-    if is_crypto_symbol(symbol):
-        validation = await validate_crypto_price(symbol, analysis["price"], risk)
-        analysis["data_quality"] = validation
-        if not validation["ok"]:
-            analysis["confidence"] = max(1, analysis["confidence"] - 30)
-            analysis["action"] = "HOLD"
-            analysis["reasons"].append(f"Data mismatch guard: max source difference {validation['max_diff_pct']:.2f}%")
 
     higher = analyze_bars(await fetch_bars(env, symbol, risk["higher_timeframe"], higher_limit), risk)
     if higher["action"] == "WARMUP" or not higher.get("price"):
@@ -592,6 +600,17 @@ async def analyze_symbol(env, symbol, risk):
     if analysis["volatility_pct"] > 6:
         analysis["confidence"] = max(1, analysis["confidence"] - 10)
         analysis["reasons"].append("ATR volatility is high for risk settings")
+    pre_validation_buy = (
+        analysis["confidence"] >= risk["min_confidence"]
+        and analysis["trend"] != "down"
+        and analysis["rr"] >= risk["min_rr"]
+    )
+    if is_crypto_symbol(symbol) and (validate_data or pre_validation_buy):
+        validation = await validate_crypto_price(symbol, analysis["price"], risk)
+        analysis["data_quality"] = validation
+        if not validation["ok"]:
+            analysis["confidence"] = max(1, analysis["confidence"] - 30)
+            analysis["reasons"].append(f"Data mismatch guard: max source difference {validation['max_diff_pct']:.2f}%")
     analysis["action"] = (
         "BUY"
         if analysis["confidence"] >= risk["min_confidence"]
@@ -992,7 +1011,7 @@ async def trade_loop(env, notify=False):
         if await cooldown_active(env, symbol):
             summary["blocked"] += 1
             continue
-        analysis = await analyze_symbol(env, symbol, risk)
+        analysis = await analyze_symbol(env, symbol, risk, False)
         if analysis["action"] == "WARMUP":
             summary["warmup"] += 1
             continue
@@ -1071,6 +1090,10 @@ async def close_all_positions(env):
     if open_orders:
         await cancel_open_orders(env)
     await alpaca(env, "/v2/positions", method="DELETE")
+    for pos in positions:
+        symbol = str(pos.get("symbol") or "").upper()
+        if is_crypto_symbol(symbol):
+            await clear_managed_crypto_position(env, symbol)
     await state_put(env, "RUNNING", "false")
     return await send_message(env, f"Close-all request sent for {len(positions)} positions and {len(open_orders)} open orders. Auto-trading is now OFF.")
 

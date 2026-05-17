@@ -109,6 +109,14 @@ Fast scan mode reduces repeated broker calls during scans and uses smaller candl
 
 The bot includes a free `/ai AAPL` review command that runs inside the Worker. It does not call Claude, OpenAI, or any paid external model. It summarizes the setup, main risk, invalidation level, and educational next step from the bot's own indicator engine.
 
+## Local Checks
+
+Run the lightweight regression tests from the repo root:
+
+```powershell
+& 'C:\Users\Danny\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' tests\test_worker_logic.py
+```
+
 ## Rollback
 
 If the Python Worker has a runtime issue, redeploy the working JavaScript Worker:
