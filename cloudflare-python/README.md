@@ -42,6 +42,8 @@ If Cloudflare asks for Python Worker tooling, follow Cloudflare's Python Worker 
 - `/watch AAPL BTC/USD ETH/USD`
 - `/risk 1`
 - `/set leverage 2`
+- `/set fast_scan on`
+- `/latency`
 - `/crypto_on` or `/crypto_off`
 - `/test`
 
@@ -66,6 +68,7 @@ The Python Worker uses:
 - Paper-only leverage simulation for crypto risk sizing and liquidation guard
 - Crypto source validation across Alpaca, Coinbase Exchange, and Binance Spot
 - TradingView chart links in readouts for visual confirmation
+- Lower-latency scan mode that reuses position/order snapshots and requests fewer candles
 
 ## Crypto And Leverage
 
@@ -88,6 +91,19 @@ No bot can guarantee perfect market data. This Worker reduces bad reads by:
 - Showing a TradingView chart link in `/explain BTC/USD` so you can visually confirm the market.
 
 TradingView is used as a visual reference link, not as an unofficial scraped data feed.
+
+## Latency
+
+This bot is designed for low-latency paper automation inside Cloudflare Worker limits, not high-frequency trading. Telegram, REST APIs, broker execution, and Cloudflare scheduling all add delay.
+
+Use:
+
+```text
+/latency
+/set fast_scan on
+```
+
+Fast scan mode reduces repeated broker calls during scans and uses smaller candle windows while keeping enough candles for indicators.
 
 ## Free Built-In Review
 

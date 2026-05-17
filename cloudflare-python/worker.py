@@ -31,6 +31,7 @@ DEFAULTS = {
     "MAX_CRYPTO_LEVERAGE": "3",
     "CRYPTO_LOCATION": "us",
     "DATA_MISMATCH_MAX_PCT": "1.25",
+    "FAST_SCAN": "true",
 }
 
 ALPACA_PAPER_API = "https://paper-api.alpaca.markets"
@@ -52,6 +53,10 @@ SETTING_ALIASES = {
     "max_crypto_leverage": ("MAX_CRYPTO_LEVERAGE", 1, 5, "x"),
     "data_mismatch": ("DATA_MISMATCH_MAX_PCT", 0.1, 5, "%"),
 }
+
+FAST_PRIMARY_LIMIT = 120
+FAST_HIGHER_LIMIT = 90
+FULL_PRIMARY_LIMIT = 180
 
 CRYPTO_ALIASES = {
     "BTC": "BTC/USD",
@@ -266,6 +271,7 @@ async def get_risk(env):
         "max_crypto_leverage": max_crypto_leverage,
         "crypto_location": await get_setting(env, "CRYPTO_LOCATION"),
         "data_mismatch_max_pct": clamp_float(await get_setting(env, "DATA_MISMATCH_MAX_PCT"), 1.25, 0.1, 5),
+        "fast_scan": as_bool(await get_setting(env, "FAST_SCAN")),
     }
 
 
@@ -541,7 +547,9 @@ def analyze_bars(bars, risk):
 
 
 async def analyze_symbol(env, symbol, risk):
-    analysis = analyze_bars(await fetch_bars(env, symbol, risk["timeframe"], 180), risk)
+    primary_limit = FAST_PRIMARY_LIMIT if risk.get("fast_scan", True) else FULL_PRIMARY_LIMIT
+    higher_limit = FAST_HIGHER_LIMIT if risk.get("fast_scan", True) else FULL_PRIMARY_LIMIT
+    analysis = analyze_bars(await fetch_bars(env, symbol, risk["timeframe"], primary_limit), risk)
     analysis["symbol"] = symbol
     analysis["timeframe"] = risk["timeframe"]
     analysis["higher_timeframe"] = {"timeframe": risk["higher_timeframe"], "status": "not checked"}
@@ -558,7 +566,7 @@ async def analyze_symbol(env, symbol, risk):
             analysis["action"] = "HOLD"
             analysis["reasons"].append(f"Data mismatch guard: max source difference {validation['max_diff_pct']:.2f}%")
 
-    higher = analyze_bars(await fetch_bars(env, symbol, risk["higher_timeframe"], 180), risk)
+    higher = analyze_bars(await fetch_bars(env, symbol, risk["higher_timeframe"], higher_limit), risk)
     if higher["action"] == "WARMUP" or not higher.get("price"):
         analysis["confidence"] = max(1, analysis["confidence"] - 5)
         analysis["higher_timeframe"] = {"timeframe": risk["higher_timeframe"], "status": "warmup"}
@@ -654,12 +662,19 @@ async def daily_loss_guard(env, account, risk):
     return daily_loss <= limit, daily_loss, baseline
 
 
-async def trade_slot_status(env, symbol, risk):
-    positions = await fetch_positions(env)
-    open_orders = await fetch_open_orders(env)
+def committed_symbols_from(positions, open_orders):
     open_order_symbols = {str(o.get("symbol") or "").upper() for o in open_orders}
     position_symbols = {str(p.get("symbol") or "").upper() for p in positions}
-    committed_symbols = position_symbols | open_order_symbols
+    return position_symbols | open_order_symbols
+
+
+async def trade_slot_status(env, symbol, risk, positions=None, open_orders=None, committed_symbols=None):
+    if positions is None:
+        positions = await fetch_positions(env)
+    if open_orders is None:
+        open_orders = await fetch_open_orders(env)
+    if committed_symbols is None:
+        committed_symbols = committed_symbols_from(positions, open_orders)
     if len(committed_symbols) >= risk["max_positions"]:
         return False, "max positions/open orders reached", positions, open_orders
     if symbol in committed_symbols:
@@ -940,6 +955,7 @@ async def manual_paper_buy(env, raw_symbol, force=False):
 
 
 async def trade_loop(env, notify=False):
+    started = now_ms()
     await manage_crypto_positions(env)
     running = await state_get(env, "RUNNING") == "true"
     if not running and not notify:
@@ -948,6 +964,9 @@ async def trade_loop(env, notify=False):
     account = await fetch_account(env)
     equity = float(account.get("equity") or account.get("portfolio_value") or 0)
     buying_power = float(account.get("buying_power") or 0)
+    positions = await fetch_positions(env)
+    open_orders = await fetch_open_orders(env)
+    committed_symbols = committed_symbols_from(positions, open_orders)
     daily_blocked, daily_loss, baseline = await daily_loss_guard(env, account, risk)
     if daily_blocked:
         await state_put(env, "RUNNING", "false")
@@ -964,7 +983,7 @@ async def trade_loop(env, notify=False):
         if not market_ok:
             summary["blocked"] += 1
             continue
-        slot_ok, slot_reason, _positions, _orders = await trade_slot_status(env, symbol, risk)
+        slot_ok, slot_reason, _positions, _orders = await trade_slot_status(env, symbol, risk, positions, open_orders, committed_symbols)
         if not slot_ok:
             summary["blocked"] += 1
             if "max positions" in slot_reason:
@@ -996,6 +1015,7 @@ async def trade_loop(env, notify=False):
             continue
         order = await submit_bracket_buy(env, symbol, qty, analysis)
         await record_managed_crypto_position(env, symbol, qty, analysis, risk, order.get("id"))
+        committed_symbols.add(symbol)
         summary["orders"] += 1
         await set_cooldown(env, symbol, risk)
         await log_event(env, "python_paper_order", {"symbol": symbol, "qty": qty, "analysis": analysis, "order_id": order.get("id")}, symbol)
@@ -1003,7 +1023,8 @@ async def trade_loop(env, notify=False):
         await send_message(env, f"Paper BUY submitted: {symbol}\nConfidence: {analysis['confidence']}%\nQty: {qty}\nEntry ref: {money(analysis['price'])}\nStop: {money(analysis['stop'])}\nTarget: {money(analysis['target'])}{leverage_note}\nWhy: {'; '.join(analysis['reasons'][:4])}\nOrder: {order.get('id', 'submitted')}")
     await log_event(env, "python_scan", summary)
     if notify and summary["orders"] == 0:
-        await send_message(env, f"Python scan complete. No paper orders opened.\nScanned: {summary['scanned']}\nWarmup: {summary['warmup']}\nHold: {summary['hold']}\nLow confidence: {summary['low']}\nBlocked: {summary['blocked']}")
+        elapsed = now_ms() - started
+        await send_message(env, f"Python scan complete in {elapsed}ms. No paper orders opened.\nScanned: {summary['scanned']}\nWarmup: {summary['warmup']}\nHold: {summary['hold']}\nLow confidence: {summary['low']}\nBlocked: {summary['blocked']}")
 
 
 async def status_text(env):
@@ -1026,6 +1047,7 @@ async def status_text(env):
         f"Crypto: {'ON' if risk['crypto_enabled'] else 'OFF'} | leverage simulation: {risk['crypto_leverage']}x paper-only",
         f"Watchlist: {', '.join(await get_watchlist(env))}",
         f"Strategy: {risk['timeframe']} + {risk['higher_timeframe']} confirmation, min confidence {risk['min_confidence']}%",
+        f"Latency mode: {'fast' if risk['fast_scan'] else 'full-history'}",
         f"Cooldown after entries: {risk['cooldown_minutes']:.0f} minutes",
     ])
 
@@ -1088,6 +1110,28 @@ async def crypto_toggle(env, enabled):
     return await send_message(env, f"Crypto paper trading is now {'ON' if enabled else 'OFF'}.")
 
 
+async def latency_text(env):
+    started = now_ms()
+    risk = await get_risk(env)
+    settings_ms = now_ms() - started
+    account_started = now_ms()
+    await fetch_account(env)
+    account_ms = now_ms() - account_started
+    quote_started = now_ms()
+    bars = await fetch_bars(env, "BTC/USD", "1Min", 3)
+    quote_ms = now_ms() - quote_started
+    total_ms = now_ms() - started
+    return "\n".join([
+        "Latency check:",
+        f"Total: {total_ms}ms",
+        f"Settings/Supabase: {settings_ms}ms",
+        f"Alpaca account: {account_ms}ms",
+        f"BTC/USD 1Min bars: {quote_ms}ms",
+        f"Fast scan: {'ON' if risk['fast_scan'] else 'OFF'}",
+        "Note: Telegram delivery and broker execution latency are outside this Worker timing.",
+    ])
+
+
 async def update_setting(env, key, value):
     alias = str(key or "").lower().strip()
     if alias in {"market", "market_guard", "market_open"}:
@@ -1102,6 +1146,12 @@ async def update_setting(env, key, value):
         enabled = as_bool(value)
         await state_put(env, "CRYPTO_TRADING_ENABLED", "true" if enabled else "false")
         return await send_message(env, f"Crypto paper trading set to {'ON' if enabled else 'OFF'}.")
+    if alias in {"fast", "fast_scan", "latency"}:
+        if str(value).lower() not in {"on", "off", "true", "false", "1", "0"}:
+            return await send_message(env, "Use /set fast_scan on or /set fast_scan off")
+        enabled = as_bool(value)
+        await state_put(env, "FAST_SCAN", "true" if enabled else "false")
+        return await send_message(env, f"Fast scan mode set to {'ON' if enabled else 'OFF'}.")
     if alias in {"timeframe", "tf"}:
         allowed = {"1min": "1Min", "5min": "5Min", "15min": "15Min", "30min": "30Min", "1hour": "1Hour", "1day": "1Day"}
         candidate = allowed.get(str(value or "").strip().lower())
@@ -1151,6 +1201,7 @@ async def settings_text(env):
         f"crypto: {'on' if risk['crypto_enabled'] else 'off'}",
         f"leverage: {risk['crypto_leverage']}x paper-only",
         f"data_mismatch: {risk['data_mismatch_max_pct']}%",
+        f"fast_scan: {'on' if risk['fast_scan'] else 'off'}",
         "Example: /set confidence 78",
     ])
 
@@ -1171,6 +1222,8 @@ def help_text():
         "/set confidence 78 - edit a setting",
         "/set leverage 2 - paper crypto leverage simulation",
         "/set data_mismatch 1.25 - max crypto source mismatch",
+        "/set fast_scan on - lower-latency scan mode",
+        "/latency - measure Worker/API latency",
         "/crypto_on or /crypto_off - toggle crypto scanning",
         "/status - show account/bot status",
         "/positions - show positions",
@@ -1217,6 +1270,8 @@ async def handle_command(env, text):
         return await update_setting(env, rest[0] if len(rest) > 0 else "", rest[1] if len(rest) > 1 else "")
     if cmd == "/status":
         return await send_message(env, await status_text(env))
+    if cmd == "/latency":
+        return await send_message(env, await latency_text(env))
     if cmd == "/positions":
         return await send_message(env, await positions_text(env))
     if cmd == "/close_all":
