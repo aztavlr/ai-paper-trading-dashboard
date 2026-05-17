@@ -211,15 +211,16 @@
     <span class="subtle" id="data-source-label">Simulator prices</span>
   </div>
   <div class="data-grid">
-    <div class="field"><label>Alpaca Key ID for stocks/ETFs</label><input type="password" id="alpaca-key" placeholder="PK..." autocomplete="off"></div>
+    <div class="field"><label>Alpaca Paper Key ID for stocks/ETFs</label><input type="password" id="alpaca-key" placeholder="Paper API Key ID" autocomplete="off"></div>
     <div class="field"><label>Alpaca Secret Key</label><input type="password" id="alpaca-secret" placeholder="Paste only on your own device" autocomplete="off"></div>
     <button class="primary" onclick="enableLiveData()">Use Live Data</button>
+    <button onclick="testAlpacaKeys()">Test Alpaca</button>
     <button onclick="refreshMarketData(true)">Update Now</button>
     <button onclick="disableLiveData()">Use Simulator</button>
   </div>
   <div id="data-status" class="status-line">Simulator mode is active. Paper trades use generated prices until live data is enabled.</div>
   <div style="margin-top:8px;font-size:12px;color:var(--text3);line-height:1.6">
-    TradingView widgets can display charts, but TradingView does not provide an export/data API for prices. This dashboard uses public Binance/Coinbase crypto quotes and optional Alpaca market data for stocks/ETFs. Alpaca keys are not saved.
+    TradingView widgets can display charts, but TradingView does not provide an export/data API for prices. This dashboard uses public Binance/Coinbase crypto quotes and optional Alpaca market data for stocks/ETFs. Use Paper Trading keys from the Alpaca dashboard. Alpaca keys are not saved.
   </div>
 </div>
 
@@ -472,6 +473,7 @@ const liveData = {
   updating: false,
   lastUpdated: null,
   lastError: '',
+  lastAlpacaError: '',
   stocksLive: false,
   cryptoLive: false
 };
@@ -539,6 +541,7 @@ function disableLiveData() {
   liveData.stocksLive = false;
   liveData.cryptoLive = false;
   liveData.lastError = '';
+  liveData.lastAlpacaError = '';
   updateDataStatus();
   showToast('Simulator prices enabled.');
 }
@@ -553,6 +556,7 @@ async function refreshMarketData(manual = false) {
   liveData.stocksLive = false;
   liveData.cryptoLive = false;
   liveData.lastError = '';
+  liveData.lastAlpacaError = '';
   try {
     const results = await Promise.allSettled([fetchCryptoPrices(), fetchAlpacaStockPrices()]);
     const cryptoOk = results[0].status === 'fulfilled' && results[0].value > 0;
@@ -562,7 +566,7 @@ async function refreshMarketData(manual = false) {
     if (!cryptoOk && !stockOk) throw new Error('No live prices updated');
     liveData.lastUpdated = new Date();
     if (!stockOk && !hasAlpacaCreds()) liveData.lastError = 'Add Alpaca keys for live stocks/ETFs. Crypto can update without keys.';
-    else if (!stockOk) liveData.lastError = 'Alpaca stock fetch failed. Check key permissions or market-data plan.';
+    else if (!stockOk) liveData.lastError = liveData.lastAlpacaError || 'Alpaca stock fetch failed. Check key permissions or market-data plan.';
     else if (!cryptoOk) liveData.lastError = 'Crypto quote fetch failed; stocks/ETFs updated.';
   } catch (e) {
     liveData.lastError = e.message || 'Live data update failed';
@@ -611,15 +615,63 @@ async function fetchAlpacaStockPrices() {
       const r = await fetch(`https://data.alpaca.markets/v2/stocks/${t.alpaca}/trades/latest?feed=iex`, {
         headers: {
           'APCA-API-KEY-ID': creds.key,
-          'APCA-API-SECRET-KEY': creds.secret
+          'APCA-API-SECRET-KEY': creds.secret,
+          'APCA-API-ACCESS-SECRET-KEY': creds.secret
         }
       });
-      if (!r.ok) continue;
+      if (!r.ok) {
+        const text = await r.text().catch(() => '');
+        liveData.lastAlpacaError = friendlyAlpacaError(r.status, text);
+        continue;
+      }
       const d = await r.json();
       if (pushPrice(t.symbol, Number(d?.trade?.p))) updated++;
     } catch (e) {}
   }
   return updated;
+}
+
+async function testAlpacaKeys() {
+  const status = document.getElementById('data-status');
+  const creds = getAlpacaCreds();
+  if (!creds.key || !creds.secret) {
+    status.style.color = '#f87171';
+    status.textContent = 'Paste both Alpaca Paper Key ID and Secret Key first.';
+    return;
+  }
+  status.style.color = '#9aa1b7';
+  status.textContent = 'Testing Alpaca Paper credentials...';
+  try {
+    const r = await fetch('https://paper-api.alpaca.markets/v2/account', {
+      headers: {
+        'APCA-API-KEY-ID': creds.key,
+        'APCA-API-SECRET-KEY': creds.secret,
+        'APCA-API-ACCESS-SECRET-KEY': creds.secret
+      }
+    });
+    const text = await r.text();
+    if (r.ok) {
+      status.style.color = '#4ade80';
+      status.textContent = 'Alpaca Paper credentials work. Click Use Live Data to update stock/ETF prices.';
+      return;
+    }
+    status.style.color = '#f87171';
+    status.textContent = friendlyAlpacaError(r.status, text);
+  } catch (e) {
+    status.style.color = '#f87171';
+    status.textContent = 'Could not reach Alpaca from this browser. Try another browser, disable blockers, or use crypto-only live data.';
+  }
+}
+
+function friendlyAlpacaError(status, body) {
+  const msg = String(body || '');
+  if (status === 401 || msg.includes('unauthorized') || msg.includes('access key verification failed')) {
+    return 'Alpaca rejected the key pair. Regenerate Paper Trading API keys, copy the new Secret immediately, and paste Key ID + Secret with no extra spaces.';
+  }
+  if (status === 403) return 'Alpaca blocked this request. Check that your Alpaca account is verified and that these are Paper Trading keys.';
+  if (status === 429) return 'Alpaca rate limit hit. Wait a minute and try again.';
+  if (status >= 500) return 'Alpaca is temporarily unavailable. Try again shortly.';
+  return `Alpaca error ${status}. Check that you are using Paper Trading keys from the Alpaca dashboard.`;
 }
 
 function updateDataStatus() {
