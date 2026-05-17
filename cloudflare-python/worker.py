@@ -30,6 +30,7 @@ DEFAULTS = {
     "CRYPTO_LEVERAGE": "2",
     "MAX_CRYPTO_LEVERAGE": "3",
     "CRYPTO_LOCATION": "us",
+    "DATA_MISMATCH_MAX_PCT": "1.25",
 }
 
 ALPACA_PAPER_API = "https://paper-api.alpaca.markets"
@@ -49,6 +50,7 @@ SETTING_ALIASES = {
     "take_profit_r": ("TAKE_PROFIT_R_MULTIPLIER", 0.5, 8, "R"),
     "leverage": ("CRYPTO_LEVERAGE", 1, 3, "x"),
     "max_crypto_leverage": ("MAX_CRYPTO_LEVERAGE", 1, 5, "x"),
+    "data_mismatch": ("DATA_MISMATCH_MAX_PCT", 0.1, 5, "%"),
 }
 
 CRYPTO_ALIASES = {
@@ -263,6 +265,7 @@ async def get_risk(env):
         "crypto_leverage": clamp_float(await get_setting(env, "CRYPTO_LEVERAGE"), 2, 1, max_crypto_leverage),
         "max_crypto_leverage": max_crypto_leverage,
         "crypto_location": await get_setting(env, "CRYPTO_LOCATION"),
+        "data_mismatch_max_pct": clamp_float(await get_setting(env, "DATA_MISMATCH_MAX_PCT"), 1.25, 0.1, 5),
     }
 
 
@@ -304,6 +307,65 @@ async def fetch_bars(env, symbol, timeframe="5Min", limit=160):
         except Exception:
             pass
     return bars
+
+
+def coinbase_product(symbol):
+    return str(symbol).replace("/", "-").upper()
+
+
+def binance_symbol(symbol):
+    compact = str(symbol).replace("/", "").upper()
+    if compact.endswith("USD"):
+        compact = compact[:-3] + "USDT"
+    return compact
+
+
+async def fetch_coinbase_price(symbol):
+    data = await request_json(f"https://api.exchange.coinbase.com/products/{coinbase_product(symbol)}/ticker")
+    return float(data.get("price") or 0)
+
+
+async def fetch_binance_price(symbol):
+    data = await request_json(f"https://api.binance.com/api/v3/ticker/price?{urlencode({'symbol': binance_symbol(symbol)})}")
+    return float(data.get("price") or 0)
+
+
+async def validate_crypto_price(symbol, alpaca_price, risk):
+    references = [{"source": "Alpaca Crypto", "price": alpaca_price, "ok": True}]
+    for name, getter in (("Coinbase Exchange", fetch_coinbase_price), ("Binance Spot", fetch_binance_price)):
+        try:
+            price = await getter(symbol)
+            if price > 0:
+                diff = abs(price - alpaca_price) / max(alpaca_price, 0.0001) * 100
+                references.append({"source": name, "price": price, "diff_pct": diff, "ok": diff <= risk["data_mismatch_max_pct"]})
+        except Exception as exc:
+            references.append({"source": name, "error": str(exc), "ok": False})
+    usable = [ref for ref in references[1:] if ref.get("price")]
+    max_diff = max((ref.get("diff_pct", 0) for ref in usable), default=0)
+    ok = bool(usable) and max_diff <= risk["data_mismatch_max_pct"]
+    return {
+        "ok": ok,
+        "max_diff_pct": max_diff,
+        "max_allowed_pct": risk["data_mismatch_max_pct"],
+        "references": references,
+    }
+
+
+def tradingview_url(symbol):
+    if is_crypto_symbol(symbol):
+        return f"https://www.tradingview.com/chart/?symbol=COINBASE:{str(symbol).replace('/', '')}"
+    return f"https://www.tradingview.com/chart/?symbol=NASDAQ:{symbol}"
+
+
+def source_summary(validation):
+    refs = validation.get("references", []) if isinstance(validation, dict) else []
+    parts = []
+    for ref in refs:
+        if ref.get("price"):
+            parts.append(f"{ref['source']} {money(float(ref['price']))}")
+        elif ref.get("error"):
+            parts.append(f"{ref['source']} unavailable")
+    return "; ".join(parts) if parts else "Source check unavailable"
 
 
 def sma(values, period):
@@ -483,8 +545,18 @@ async def analyze_symbol(env, symbol, risk):
     analysis["symbol"] = symbol
     analysis["timeframe"] = risk["timeframe"]
     analysis["higher_timeframe"] = {"timeframe": risk["higher_timeframe"], "status": "not checked"}
+    analysis["data_quality"] = {"ok": True, "source": "Alpaca IEX stock bars" if not is_crypto_symbol(symbol) else "Alpaca crypto bars"}
+    analysis["tradingview_url"] = tradingview_url(symbol)
     if analysis["action"] == "WARMUP" or not analysis.get("price"):
         return analysis
+
+    if is_crypto_symbol(symbol):
+        validation = await validate_crypto_price(symbol, analysis["price"], risk)
+        analysis["data_quality"] = validation
+        if not validation["ok"]:
+            analysis["confidence"] = max(1, analysis["confidence"] - 30)
+            analysis["action"] = "HOLD"
+            analysis["reasons"].append(f"Data mismatch guard: max source difference {validation['max_diff_pct']:.2f}%")
 
     higher = analyze_bars(await fetch_bars(env, symbol, risk["higher_timeframe"], 180), risk)
     if higher["action"] == "WARMUP" or not higher.get("price"):
@@ -517,6 +589,7 @@ async def analyze_symbol(env, symbol, risk):
         if analysis["confidence"] >= risk["min_confidence"]
         and analysis["trend"] != "down"
         and analysis["rr"] >= risk["min_rr"]
+        and analysis.get("data_quality", {}).get("ok", True)
         else "HOLD"
     )
     return analysis
@@ -780,6 +853,10 @@ async def explain_symbol(env, raw_symbol):
         return await send_message(env, f"No candle data available for {symbol}.")
     htf = analysis.get("higher_timeframe") or {}
     leverage_line = f"Paper leverage: {risk['crypto_leverage']}x simulated" if is_crypto_symbol(symbol) else "Paper leverage: none"
+    dq = analysis.get("data_quality", {})
+    data_line = f"Data check: {'OK' if dq.get('ok', True) else 'BLOCKED'}"
+    if is_crypto_symbol(symbol):
+        data_line += f" | {source_summary(dq)}"
     return await send_message(env, "\n".join([
         f"{symbol} Python Worker readout ({risk['timeframe']})",
         f"Action: {analysis['action']}",
@@ -791,6 +868,8 @@ async def explain_symbol(env, raw_symbol):
         f"ATR: {money(analysis['atr'])} | Stop: {money(analysis['stop'])} | Target: {money(analysis['target'])}",
         f"Risk/reward: {analysis.get('rr', 0):.2f}R",
         leverage_line,
+        data_line,
+        f"TradingView: {analysis.get('tradingview_url')}",
         f"Pattern: {analysis['pattern'] or 'none'}",
         f"Why: {'; '.join(analysis['reasons'])}",
     ]))
@@ -833,6 +912,13 @@ async def manual_paper_buy(env, raw_symbol, force=False):
     analysis = await analyze_symbol(env, symbol, risk)
     if analysis.get("action") == "WARMUP" or not analysis.get("price") or not analysis.get("stop") or not analysis.get("target"):
         return await send_message(env, f"Risk guard blocked {symbol}: not enough clean candle data for a bracket order.")
+    if not analysis.get("data_quality", {}).get("ok", True):
+        return await send_message(env, "\n".join([
+            f"Risk guard blocked {symbol}: market data sources disagree.",
+            source_summary(analysis.get("data_quality", {})),
+            f"Max allowed mismatch: {risk['data_mismatch_max_pct']}%",
+            f"TradingView check: {analysis.get('tradingview_url')}",
+        ]))
     if analysis.get("action") != "BUY" and not force:
         return await send_message(env, "\n".join([
             f"Paper buy blocked for {symbol}: signal is {analysis.get('action')} at {analysis.get('confidence', 0)}%.",
@@ -840,8 +926,9 @@ async def manual_paper_buy(env, raw_symbol, force=False):
             "Use /explain first, or /force_buy SYMBOL only if you intentionally want a risk-sized paper test.",
         ]))
     qty = position_size(equity, analysis["price"], risk, analysis.get("stop"), buying_power, symbol)
-    if qty < 1:
-        return await send_message(env, f"Risk sizing blocked {symbol}: quantity below 1 share.")
+    min_notional = qty * analysis["price"]
+    if qty <= 0 or (is_crypto_symbol(symbol) and min_notional < 1) or (not is_crypto_symbol(symbol) and qty < 1):
+        return await send_message(env, f"Risk sizing blocked {symbol}: quantity/notional too small.")
     order = await submit_bracket_buy(env, symbol, qty, analysis)
     await record_managed_crypto_position(env, symbol, qty, analysis, risk, order.get("id"))
     await set_cooldown(env, symbol, risk)
@@ -893,6 +980,9 @@ async def trade_loop(env, notify=False):
         if analysis["action"] != "BUY":
             summary["hold"] += 1
             continue
+        if not analysis.get("data_quality", {}).get("ok", True):
+            summary["blocked"] += 1
+            continue
         if analysis["confidence"] < risk["min_confidence"]:
             summary["low"] += 1
             continue
@@ -900,7 +990,8 @@ async def trade_loop(env, notify=False):
             summary["blocked"] += 1
             continue
         qty = position_size(equity, analysis["price"], risk, analysis["stop"], buying_power, symbol)
-        if qty < 1:
+        min_notional = qty * analysis["price"]
+        if qty <= 0 or (is_crypto_symbol(symbol) and min_notional < 1) or (not is_crypto_symbol(symbol) and qty < 1):
             summary["blocked"] += 1
             continue
         order = await submit_bracket_buy(env, symbol, qty, analysis)
@@ -1059,6 +1150,7 @@ async def settings_text(env):
         f"market_guard: {'on' if risk['market_open_only'] else 'off'}",
         f"crypto: {'on' if risk['crypto_enabled'] else 'off'}",
         f"leverage: {risk['crypto_leverage']}x paper-only",
+        f"data_mismatch: {risk['data_mismatch_max_pct']}%",
         "Example: /set confidence 78",
     ])
 
@@ -1078,6 +1170,7 @@ def help_text():
         "/settings - show editable settings",
         "/set confidence 78 - edit a setting",
         "/set leverage 2 - paper crypto leverage simulation",
+        "/set data_mismatch 1.25 - max crypto source mismatch",
         "/crypto_on or /crypto_off - toggle crypto scanning",
         "/status - show account/bot status",
         "/positions - show positions",

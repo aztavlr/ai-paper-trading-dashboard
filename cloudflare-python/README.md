@@ -64,6 +64,8 @@ The Python Worker uses:
 - Alpaca crypto spot paper orders using `BTC/USD` style symbols
 - Managed crypto exits for stop/target checks on scheduled scans
 - Paper-only leverage simulation for crypto risk sizing and liquidation guard
+- Crypto source validation across Alpaca, Coinbase Exchange, and Binance Spot
+- TradingView chart links in readouts for visual confirmation
 
 ## Crypto And Leverage
 
@@ -75,6 +77,17 @@ This Worker therefore does two separate things:
 - Simulates leverage in the bot's own risk model for education with `/set leverage 2`.
 
 The simulated leverage is not real exchange leverage, does not borrow funds, and should not be treated like a live futures bot.
+
+## Data Accuracy Guard
+
+No bot can guarantee perfect market data. This Worker reduces bad reads by:
+
+- Treating Alpaca as the execution/data source for paper orders.
+- Cross-checking crypto prices against Coinbase Exchange and Binance Spot before buying.
+- Blocking crypto buys when sources differ by more than `/set data_mismatch 1.25`.
+- Showing a TradingView chart link in `/explain BTC/USD` so you can visually confirm the market.
+
+TradingView is used as a visual reference link, not as an unofficial scraped data feed.
 
 ## Free Built-In Review
 
