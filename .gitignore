@@ -3,3 +3,6 @@ telegram secret improved_files/
 gh_*_windows_amd64.msi
 bot/.env
 cloudflare/.wrangler/
+__pycache__/
+*.pyc
+python-bot/.env
