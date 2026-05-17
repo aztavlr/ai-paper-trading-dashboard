@@ -30,6 +30,8 @@ This is an educational paper trading simulator. It does not connect to a broker,
 
 TradingView widgets/charts are used only as visual references. TradingView does not provide a public data export API for prices or indicators, so paper-trade pricing comes from simulator mode or live quote providers such as Alpaca/Binance/Coinbase.
 
+Live mode labels each symbol as `LIVE`, `STALE`, or `SIM`. New paper entries are blocked for symbols that are not currently using live data, so the app does not silently trade from simulated fallback prices.
+
 ## Privacy
 
 The app is static and runs in the browser. It does not store user data on a project server. API keys and Telegram details are session-only by default, and users must explicitly opt in before any remembered value is saved on their own device.

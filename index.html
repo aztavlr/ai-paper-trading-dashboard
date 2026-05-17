@@ -106,6 +106,10 @@
   .sig-sell { background: rgba(248,113,113,.15); color: var(--red); border: 1px solid rgba(248,113,113,.28); }
   .sig-hold { background: rgba(251,191,36,.15); color: var(--amber); border: 1px solid rgba(251,191,36,.26); }
   .sig-blocked { background: rgba(167,139,250,.15); color: var(--violet); border: 1px solid rgba(167,139,250,.3); min-width: 122px; }
+  .source-tag { display: inline-flex; align-items: center; margin-left: 6px; padding: 1px 5px; border-radius: 4px; border: 1px solid var(--border2); font-size: 9px; font-weight: 750; color: var(--text3); vertical-align: 1px; }
+  .source-tag.live { color: var(--green); border-color: rgba(74,222,128,.28); background: rgba(74,222,128,.08); }
+  .source-tag.stale { color: var(--amber); border-color: rgba(251,191,36,.28); background: rgba(251,191,36,.08); }
+  .source-tag.sim { color: var(--red); border-color: rgba(248,113,113,.24); background: rgba(248,113,113,.08); }
   .tabs { display: flex; gap: 4px; }
   button, .tab {
     background: var(--bg3); border: 1px solid var(--border2); color: var(--text);
@@ -121,7 +125,8 @@
   button:disabled { opacity: .45; cursor: not-allowed; border-color: var(--border); color: var(--text3); }
   .tab { padding: 5px 10px; font-size: 12px; }
   .tab.active { background: var(--blue-bg); color: var(--blue); border-color: rgba(96,165,250,.35); }
-  .chart-box { position: relative; width: 100%; height: 220px; }
+  .chart-box { position: relative; width: 100%; height: 260px; overflow: hidden; border-radius: var(--radius-sm); }
+  .chart-box canvas { width: 100% !important; height: 100% !important; }
   .chart-footer { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 10px; font-size: 12px; color: var(--text2); }
   .ta-grid, .risk-grid, .stats-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
   .ta-metric, .risk-tile, .stat-tile {
@@ -300,12 +305,14 @@
       <span id="chart-title">AAPL - Price Chart</span>
       <div class="tabs">
         <button class="tab" onclick="openTradingView()">TradingView</button>
-        <button class="tab active" onclick="setRange('1H')">1H</button>
-        <button class="tab" onclick="setRange('4H')">4H</button>
-        <button class="tab" onclick="setRange('1D')">1D</button>
+        <button class="tab active range-tab" onclick="setRange('1H')">1H</button>
+        <button class="tab range-tab" onclick="setRange('4H')">4H</button>
+        <button class="tab range-tab" onclick="setRange('1D')">1D</button>
       </div>
     </div>
-    <div class="chart-box"><canvas id="priceChart" role="img" aria-label="Simulated price chart"></canvas></div>
+    <div class="chart-box" id="chart-box">
+      <canvas id="priceChart" role="img" aria-label="Dashboard price chart"></canvas>
+    </div>
     <div class="chart-footer" id="chart-footer"></div>
   </div>
 </div>
@@ -542,6 +549,7 @@ const liveData = {
   stocksLive: false,
   cryptoLive: false
 };
+const marketSources = {};
 const positions = [];
 const tradeLog = [];
 const cooldowns = {};
@@ -565,6 +573,7 @@ function initHist() {
       a.push(+p.toFixed(2));
     }
     hist[t.symbol] = a;
+    markSource(t.symbol, 'sim', 'Simulator');
   });
 }
 
@@ -574,14 +583,45 @@ function tickPrices() {
     const last = h[h.length - 1];
     h.push(+(last * (1 + (Math.random() - 0.48) * t.vol)).toFixed(2));
     if (h.length > HIST_LEN) h.shift();
+    markSource(t.symbol, 'sim', 'Simulator');
   });
 }
 
-function pushPrice(sym, price) {
+function pushPrice(sym, price, source = 'live', label = 'Live') {
   if (!Number.isFinite(price) || price <= 0 || !hist[sym]) return false;
   hist[sym].push(+price.toFixed(2));
   if (hist[sym].length > HIST_LEN) hist[sym].shift();
+  markSource(sym, source, label);
   return true;
+}
+
+function markSource(sym, source, label) {
+  marketSources[sym] = {
+    source,
+    label,
+    updatedAt: Date.now()
+  };
+}
+
+function getSourceMeta(sym) {
+  const meta = marketSources[sym] || { source: 'sim', label: 'Simulator', updatedAt: 0 };
+  const ageMs = Date.now() - (meta.updatedAt || 0);
+  const staleLimit = meta.source === 'sim' ? Infinity : 10 * 60 * 1000;
+  return {
+    ...meta,
+    isLive: meta.source === 'live',
+    isSim: meta.source === 'sim',
+    isStale: meta.source === 'live' && ageMs > staleLimit,
+    ageMs
+  };
+}
+
+function marketDataBlock(sym) {
+  if (!liveData.enabled) return '';
+  const meta = getSourceMeta(sym);
+  if (!meta.isLive) return 'Waiting for live market data';
+  if (meta.isStale) return 'Live market data is stale';
+  return '';
 }
 
 function getAlpacaCreds() {
@@ -685,7 +725,6 @@ async function refreshMarketData(manual = false) {
     else if (!cryptoOk) liveData.lastError = 'Crypto quote fetch failed; stocks/ETFs updated.';
   } catch (e) {
     liveData.lastError = e.message || 'Live data update failed';
-    tickPrices();
   } finally {
     liveData.updating = false;
     updateDataStatus();
@@ -703,7 +742,7 @@ async function fetchCryptoPrices() {
     const rows = await r.json();
     rows.forEach(row => {
       const t = cryptos.find(x => x.binance === row.symbol);
-      if (t && pushPrice(t.symbol, Number(row.price))) updated++;
+      if (t && pushPrice(t.symbol, Number(row.price), 'live', 'Binance')) updated++;
     });
     if (updated) return updated;
   } catch (e) {
@@ -714,7 +753,7 @@ async function fetchCryptoPrices() {
       const r = await fetch(`https://api.coinbase.com/v2/prices/${t.coinbase}/spot`);
       if (!r.ok) continue;
       const d = await r.json();
-      if (pushPrice(t.symbol, Number(d?.data?.amount))) updated++;
+      if (pushPrice(t.symbol, Number(d?.data?.amount), 'live', 'Coinbase')) updated++;
     } catch (e) {}
   }
   return updated;
@@ -740,7 +779,7 @@ async function fetchAlpacaStockPrices() {
     stocks.forEach(t => {
       const snap = snapshots?.[t.alpaca];
       const price = Number(snap?.latestTrade?.p ?? snap?.latestQuote?.ap ?? snap?.latestQuote?.bp ?? snap?.minuteBar?.c ?? snap?.dailyBar?.c);
-      if (pushPrice(t.symbol, price)) updated++;
+      if (pushPrice(t.symbol, price, 'live', 'Alpaca IEX')) updated++;
     });
     if (updated) return updated;
   } catch (e) {
@@ -759,7 +798,7 @@ async function fetchAlpacaStockPrices() {
         continue;
       }
       const d = await r.json();
-      if (pushPrice(t.symbol, Number(d?.trade?.p))) updated++;
+      if (pushPrice(t.symbol, Number(d?.trade?.p), 'live', 'Alpaca IEX')) updated++;
     } catch (e) {}
   }
   return updated;
@@ -830,7 +869,9 @@ function updateDataStatus() {
     chips.push('<span class="status-chip warn">Simulator prices</span>');
   }
   const stamp = liveData.lastUpdated ? `Last update ${liveData.lastUpdated.toLocaleTimeString()}.` : '';
-  const detail = liveData.enabled ? stamp : 'Paper trades use generated prices until live data is enabled.';
+  const detail = liveData.enabled
+    ? `${stamp} Live mode blocks new paper entries for symbols still marked SIM or STALE.`
+    : 'Paper trades use generated prices until live data is enabled.';
   const warning = liveData.lastError ? `<span class="warn">${escapeHtml(liveData.lastError)}</span>` : '';
   document.getElementById('market-mode-label').textContent = mode;
   document.getElementById('data-source-label').textContent = liveData.enabled
@@ -956,6 +997,8 @@ function sessionPnL() {
 }
 
 function getRiskBlock(sym) {
+  const dataBlock = marketDataBlock(sym);
+  if (dataBlock) return dataBlock;
   const open = getOpenPositions();
   if (sessionPnL() <= -dailyLossLimitDollars()) return 'Max daily loss hit';
   if (open.length >= riskSettings.maxOpenPositions) return 'Max positions open';
@@ -1006,8 +1049,11 @@ function renderWL() {
     const sc = d.blocked && d.sig !== 'HOLD' ? 'sig-blocked' : d.sig === 'BUY' ? 'sig-buy' : d.sig === 'SELL' ? 'sig-sell' : 'sig-hold';
     const label = d.blocked && d.sig !== 'HOLD' ? 'BLOCKED' : d.sig;
     const cc = d.chg >= 0 ? 'up' : 'dn';
+    const src = getSourceMeta(t.symbol);
+    const srcClass = src.isStale ? 'stale' : src.isLive ? 'live' : 'sim';
+    const srcLabel = src.isStale ? 'STALE' : src.isLive ? 'LIVE' : 'SIM';
     return `<div class="wrow ${t.symbol === selSym ? 'active' : ''}" onclick="sel('${t.symbol}')">
-      <span><div class="sym">${t.symbol}</div><div class="name">${t.name}</div></span>
+      <span><div class="sym">${t.symbol}<span class="source-tag ${srcClass}" title="${escapeHtml(src.label)}">${srcLabel}</span></div><div class="name">${t.name} · ${escapeHtml(src.label)}</div></span>
       <span class="right mono" style="font-weight:650;font-size:13px">${fmt(d.cur)}</span>
       <span class="right ${cc}" style="font-size:12px">${d.chg >= 0 ? '+' : ''}${d.chgPct}%</span>
       <span class="right mono" style="font-size:12px">${d.rsi}</span>
@@ -1046,22 +1092,26 @@ function renderChart() {
       }
     });
   }
+  const src = getSourceMeta(selSym);
+  const srcText = src.isStale ? `${src.label} stale` : src.label;
   document.getElementById('chart-footer').innerHTML =
     `<span>Open <b>${fmt(hist[selSym][0])}</b></span>` +
     `<span>High <b class="up">${fmt(Math.max(...data))}</b></span>` +
-    `<span>Low <b class="dn">${fmt(Math.min(...data))}</b></span>`;
+    `<span>Low <b class="dn">${fmt(Math.min(...data))}</b></span>` +
+    `<span>Source <b class="${src.isLive && !src.isStale ? 'up' : src.isStale ? 'warn' : 'dn'}">${escapeHtml(srcText)}</b></span>` +
+    '<span class="warn">TradingView opens in a new tab for visual comparison; signals use dashboard quote feed.</span>';
 }
 
 function setRange(r) {
   rng = r;
-  document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b.textContent === r));
+  document.querySelectorAll('.range-tab').forEach(b => b.classList.toggle('active', b.textContent === r));
   renderChart();
 }
 
 function openTradingView() {
   const t = TICKERS.find(x => x.symbol === selSym);
-  const symbol = encodeURIComponent(t?.tv || selSym);
-  window.open(`https://www.tradingview.com/chart/?symbol=${symbol}`, '_blank', 'noopener,noreferrer');
+  const symbol = t?.tv || selSym;
+  window.open(`https://www.tradingview.com/chart/?symbol=${encodeURIComponent(symbol)}`, '_blank', 'noopener,noreferrer');
 }
 
 function sel(sym) {
@@ -1151,6 +1201,7 @@ function calcTrail(pos, price) {
 
 function updatePositions() {
   for (const pos of getOpenPositions()) {
+    if (marketDataBlock(pos.symbol)) continue;
     const price = getPrice(pos.symbol);
     if (riskSettings.trailingEnabled) {
       const nextTrail = calcTrail(pos, price);
@@ -1550,7 +1601,8 @@ async function sendChat() {
   const openPositions = getOpenPositions().map(p => `${p.symbol} ${p.side} qty ${fmtQty(p.qty)} entry ${fmt(p.entry)} stop ${fmt(p.stop)} target ${fmt(p.target)} unrealized ${fmt(getPositionPnL(p, getPrice(p.symbol)))}`).join('\n') || 'No open positions';
   const mktCtx = TICKERS.map(t => {
     const x = getD(t.symbol);
-    return `${t.symbol}: ${fmt(x.cur)}, RSI ${x.rsi}, Signal ${x.sig}, Confidence ${x.confidence}%, MACD ${x.macd}, Trend ${x.bull ? 'Bullish' : 'Bearish'}, Block ${x.blocked || 'None'}`;
+    const src = getSourceMeta(t.symbol);
+    return `${t.symbol}: ${fmt(x.cur)}, Source ${src.isLive && !src.isStale ? src.label : src.isStale ? src.label + ' stale' : 'Simulator'}, RSI ${x.rsi}, Signal ${x.sig}, Confidence ${x.confidence}%, MACD ${x.macd}, Trend ${x.bull ? 'Bullish' : 'Bearish'}, Block ${x.blocked || 'None'}`;
   }).join('\n');
   try {
     const r = await fetch('https://api.anthropic.com/v1/messages', {
@@ -1559,7 +1611,7 @@ async function sendChat() {
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
         max_tokens: 1000,
-        system: `You are an educational AI trading assistant inside a browser-only paper trading simulator. Do not give direct financial advice or tell the user what they must buy or sell. Explain signal quality, risk, stop-loss placement, take-profit planning, and paper-trading process. Keep answers concise.\n\nSelected ticker: ${selSym}\nSelected data: price ${fmt(d.cur)}, RSI ${d.rsi}, MACD ${d.macd}, trend ${d.bull ? 'Bullish' : 'Bearish'}, signal ${d.sig}, confidence ${d.confidence}%\nRisk settings: risk ${riskSettings.riskPerTrade}% per trade, stop ${riskSettings.stopLoss}%, target ${riskSettings.takeProfit}%, trailing ${riskSettings.trailingEnabled ? riskSettings.trailingStop + '%' : 'off'}, max daily loss ${riskSettings.maxDailyLoss}%, max positions ${riskSettings.maxOpenPositions}, cooldown ${riskSettings.cooldownCycles} cycles\nExample long plan: entry ${fmt(planLong.entry)}, stop ${fmt(planLong.stop)}, target ${fmt(planLong.target)}, size ${fmtQty(planLong.qty)}\nOpen positions:\n${openPositions}\n\nAll market data:\n${mktCtx}`,
+        system: `You are an educational AI trading assistant inside a browser-only paper trading simulator. Do not give direct financial advice or tell the user what they must buy or sell. Explain signal quality, risk, stop-loss placement, take-profit planning, and paper-trading process. Keep answers concise. Be explicit when data is simulated, stale, IEX-only, or a TradingView visual reference.\n\nSelected ticker: ${selSym}\nSelected data: price ${fmt(d.cur)}, source ${getSourceMeta(selSym).label}, RSI ${d.rsi}, MACD ${d.macd}, trend ${d.bull ? 'Bullish' : 'Bearish'}, signal ${d.sig}, confidence ${d.confidence}%\nRisk settings: risk ${riskSettings.riskPerTrade}% per trade, stop ${riskSettings.stopLoss}%, target ${riskSettings.takeProfit}%, trailing ${riskSettings.trailingEnabled ? riskSettings.trailingStop + '%' : 'off'}, max daily loss ${riskSettings.maxDailyLoss}%, max positions ${riskSettings.maxOpenPositions}, cooldown ${riskSettings.cooldownCycles} cycles\nExample long plan: entry ${fmt(planLong.entry)}, stop ${fmt(planLong.stop)}, target ${fmt(planLong.target)}, size ${fmtQty(planLong.qty)}\nOpen positions:\n${openPositions}\n\nAll market data:\n${mktCtx}`,
         messages: chatHist.slice(-8)
       })
     });
