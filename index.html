@@ -154,6 +154,7 @@
   }
   .api-grid, .tg-grid { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: end; }
   .tg-grid { grid-template-columns: 1fr 1fr auto auto; }
+  .data-grid { display: grid; grid-template-columns: 1fr 1fr auto auto auto; gap: 10px; align-items: end; }
   .toggle-wrap { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text2); }
   .toggle { width: 38px; height: 22px; border-radius: 999px; background: var(--bg3); border: 1px solid var(--border2); cursor: pointer; position: relative; transition: background .25s; flex-shrink: 0; }
   .toggle.on { background: var(--green-bg); border-color: rgba(74,222,128,.36); }
@@ -176,7 +177,7 @@
     body { padding: 12px; }
     .header { align-items: flex-start; flex-direction: column; }
     .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .risk-form, .api-grid, .tg-grid { grid-template-columns: 1fr; }
+    .risk-form, .api-grid, .tg-grid, .data-grid { grid-template-columns: 1fr; }
     .wl-header, .wrow { grid-template-columns: 1.15fr .9fr .6fr .55fr .8fr; gap: 5px; }
     .metric-value { font-size: 18px; }
     .trade-actions { grid-template-columns: 1fr; }
@@ -187,11 +188,11 @@
 <div class="header">
   <div>
     <h1>AI Paper Trading Bot Dashboard</h1>
-    <p>Simulated markets only | Risk managed paper positions | Telegram alerts | Educational use</p>
+    <p>Live or simulated market data | Risk managed paper positions | Telegram alerts | Educational use</p>
   </div>
   <div class="live-badge">
     <span class="dot"></span>
-    <span>Paper mode</span>
+    <span id="market-mode-label">Simulator mode</span>
     <span class="mono" id="clock">--:--:--</span>
   </div>
 </div>
@@ -202,6 +203,24 @@
   <div class="metric"><div class="metric-label">Unrealized P&L</div><div class="metric-value" id="unrealized-val">$0</div></div>
   <div class="metric"><div class="metric-label">Open Positions</div><div class="metric-value" id="open-count">0 / 3</div></div>
   <div class="metric"><div class="metric-label">TG Alerts Sent</div><div class="metric-value" id="alert-cnt">0</div></div>
+</div>
+
+<div class="card" style="margin-bottom:14px;border-color:rgba(74,222,128,.22)">
+  <div class="card-title">
+    <span>Market Data Source</span>
+    <span class="subtle" id="data-source-label">Simulator prices</span>
+  </div>
+  <div class="data-grid">
+    <div class="field"><label>Alpaca Key ID for stocks/ETFs</label><input type="password" id="alpaca-key" placeholder="PK..." autocomplete="off"></div>
+    <div class="field"><label>Alpaca Secret Key</label><input type="password" id="alpaca-secret" placeholder="Paste only on your own device" autocomplete="off"></div>
+    <button class="primary" onclick="enableLiveData()">Use Live Data</button>
+    <button onclick="refreshMarketData(true)">Update Now</button>
+    <button onclick="disableLiveData()">Use Simulator</button>
+  </div>
+  <div id="data-status" class="status-line">Simulator mode is active. Paper trades use generated prices until live data is enabled.</div>
+  <div style="margin-top:8px;font-size:12px;color:var(--text3);line-height:1.6">
+    TradingView widgets can display charts, but TradingView does not provide an export/data API for prices. This dashboard uses public Binance/Coinbase crypto quotes and optional Alpaca market data for stocks/ETFs. Alpaca keys are not saved.
+  </div>
 </div>
 
 <div class="main-grid">
@@ -220,6 +239,7 @@
     <div class="card-title">
       <span id="chart-title">AAPL - Price Chart</span>
       <div class="tabs">
+        <button class="tab" onclick="openTradingView()">TradingView</button>
         <button class="tab active" onclick="setRange('1H')">1H</button>
         <button class="tab" onclick="setRange('4H')">4H</button>
         <button class="tab" onclick="setRange('1D')">1D</button>
@@ -410,14 +430,14 @@
 
 <script>
 const TICKERS = [
-  {symbol:'AAPL', name:'Apple Inc', base:185.50, vol:0.008},
-  {symbol:'TSLA', name:'Tesla', base:245.30, vol:0.018},
-  {symbol:'NVDA', name:'NVIDIA', base:875.20, vol:0.015},
-  {symbol:'MSFT', name:'Microsoft', base:415.80, vol:0.007},
-  {symbol:'BTC', name:'Bitcoin', base:68420, vol:0.022},
-  {symbol:'ETH', name:'Ethereum', base:3580, vol:0.025},
-  {symbol:'GOOGL', name:'Alphabet', base:175.40, vol:0.009},
-  {symbol:'SPY', name:'S&P 500 ETF', base:524.10, vol:0.005}
+  {symbol:'AAPL', name:'Apple Inc', base:185.50, vol:0.008, asset:'stock', alpaca:'AAPL', tv:'NASDAQ:AAPL'},
+  {symbol:'TSLA', name:'Tesla', base:245.30, vol:0.018, asset:'stock', alpaca:'TSLA', tv:'NASDAQ:TSLA'},
+  {symbol:'NVDA', name:'NVIDIA', base:875.20, vol:0.015, asset:'stock', alpaca:'NVDA', tv:'NASDAQ:NVDA'},
+  {symbol:'MSFT', name:'Microsoft', base:415.80, vol:0.007, asset:'stock', alpaca:'MSFT', tv:'NASDAQ:MSFT'},
+  {symbol:'BTC', name:'Bitcoin', base:68420, vol:0.022, asset:'crypto', binance:'BTCUSDT', coinbase:'BTC-USD', tv:'BINANCE:BTCUSDT'},
+  {symbol:'ETH', name:'Ethereum', base:3580, vol:0.025, asset:'crypto', binance:'ETHUSDT', coinbase:'ETH-USD', tv:'BINANCE:ETHUSDT'},
+  {symbol:'GOOGL', name:'Alphabet', base:175.40, vol:0.009, asset:'stock', alpaca:'GOOGL', tv:'NASDAQ:GOOGL'},
+  {symbol:'SPY', name:'S&P 500 ETF', base:524.10, vol:0.005, asset:'stock', alpaca:'SPY', tv:'AMEX:SPY'}
 ];
 
 const HIST_LEN = 80;
@@ -430,6 +450,7 @@ let alertCnt = 0;
 let toastTimer;
 let chatHist = [];
 let nextPositionId = 1;
+let marketTimer = null;
 
 let portfolioStart = 25000;
 let cashBalance = portfolioStart;
@@ -445,6 +466,14 @@ const riskSettings = {
   maxDailyLoss: 3,
   maxOpenPositions: 3,
   cooldownCycles: 2
+};
+const liveData = {
+  enabled: false,
+  updating: false,
+  lastUpdated: null,
+  lastError: '',
+  stocksLive: false,
+  cryptoLive: false
 };
 const positions = [];
 const tradeLog = [];
@@ -479,6 +508,133 @@ function tickPrices() {
     h.push(+(last * (1 + (Math.random() - 0.48) * t.vol)).toFixed(2));
     if (h.length > HIST_LEN) h.shift();
   });
+}
+
+function pushPrice(sym, price) {
+  if (!Number.isFinite(price) || price <= 0 || !hist[sym]) return false;
+  hist[sym].push(+price.toFixed(2));
+  if (hist[sym].length > HIST_LEN) hist[sym].shift();
+  return true;
+}
+
+function getAlpacaCreds() {
+  return {
+    key: document.getElementById('alpaca-key')?.value.trim() || '',
+    secret: document.getElementById('alpaca-secret')?.value.trim() || ''
+  };
+}
+
+function hasAlpacaCreds() {
+  const c = getAlpacaCreds();
+  return !!(c.key && c.secret);
+}
+
+function enableLiveData() {
+  liveData.enabled = true;
+  refreshMarketData(true);
+}
+
+function disableLiveData() {
+  liveData.enabled = false;
+  liveData.stocksLive = false;
+  liveData.cryptoLive = false;
+  liveData.lastError = '';
+  updateDataStatus();
+  showToast('Simulator prices enabled.');
+}
+
+async function refreshMarketData(manual = false) {
+  if (!liveData.enabled) {
+    if (manual) showToast('Turn on live data first, or continue using simulator mode.');
+    return;
+  }
+  if (liveData.updating) return;
+  liveData.updating = true;
+  liveData.stocksLive = false;
+  liveData.cryptoLive = false;
+  liveData.lastError = '';
+  try {
+    const results = await Promise.allSettled([fetchCryptoPrices(), fetchAlpacaStockPrices()]);
+    const cryptoOk = results[0].status === 'fulfilled' && results[0].value > 0;
+    const stockOk = results[1].status === 'fulfilled' && results[1].value > 0;
+    liveData.cryptoLive = cryptoOk;
+    liveData.stocksLive = stockOk;
+    if (!cryptoOk && !stockOk) throw new Error('No live prices updated');
+    liveData.lastUpdated = new Date();
+    if (!stockOk && !hasAlpacaCreds()) liveData.lastError = 'Add Alpaca keys for live stocks/ETFs. Crypto can update without keys.';
+    else if (!stockOk) liveData.lastError = 'Alpaca stock fetch failed. Check key permissions or market-data plan.';
+    else if (!cryptoOk) liveData.lastError = 'Crypto quote fetch failed; stocks/ETFs updated.';
+  } catch (e) {
+    liveData.lastError = e.message || 'Live data update failed';
+    tickPrices();
+  } finally {
+    liveData.updating = false;
+    updateDataStatus();
+    renderAll();
+  }
+}
+
+async function fetchCryptoPrices() {
+  const cryptos = TICKERS.filter(t => t.asset === 'crypto');
+  let updated = 0;
+  try {
+    const symbols = encodeURIComponent(JSON.stringify(cryptos.map(t => t.binance)));
+    const r = await fetch(`https://api.binance.com/api/v3/ticker/price?symbols=${symbols}`);
+    if (!r.ok) throw new Error('Binance unavailable');
+    const rows = await r.json();
+    rows.forEach(row => {
+      const t = cryptos.find(x => x.binance === row.symbol);
+      if (t && pushPrice(t.symbol, Number(row.price))) updated++;
+    });
+    if (updated) return updated;
+  } catch (e) {
+    updated = 0;
+  }
+  for (const t of cryptos) {
+    try {
+      const r = await fetch(`https://api.coinbase.com/v2/prices/${t.coinbase}/spot`);
+      if (!r.ok) continue;
+      const d = await r.json();
+      if (pushPrice(t.symbol, Number(d?.data?.amount))) updated++;
+    } catch (e) {}
+  }
+  return updated;
+}
+
+async function fetchAlpacaStockPrices() {
+  const creds = getAlpacaCreds();
+  if (!creds.key || !creds.secret) return 0;
+  let updated = 0;
+  const stocks = TICKERS.filter(t => t.asset === 'stock');
+  for (const t of stocks) {
+    try {
+      const r = await fetch(`https://data.alpaca.markets/v2/stocks/${t.alpaca}/trades/latest?feed=iex`, {
+        headers: {
+          'APCA-API-KEY-ID': creds.key,
+          'APCA-API-SECRET-KEY': creds.secret
+        }
+      });
+      if (!r.ok) continue;
+      const d = await r.json();
+      if (pushPrice(t.symbol, Number(d?.trade?.p))) updated++;
+    } catch (e) {}
+  }
+  return updated;
+}
+
+function updateDataStatus() {
+  const mode = liveData.enabled ? 'Live data mode' : 'Simulator mode';
+  const parts = [];
+  if (liveData.enabled) {
+    parts.push(liveData.cryptoLive ? 'crypto live' : 'crypto not live');
+    parts.push(liveData.stocksLive ? 'stocks/ETFs live' : 'stocks/ETFs not live');
+  }
+  const stamp = liveData.lastUpdated ? ` Last update ${liveData.lastUpdated.toLocaleTimeString()}.` : '';
+  const detail = liveData.enabled ? `${parts.join(' | ')}.${stamp}` : 'Paper trades use generated prices until live data is enabled.';
+  document.getElementById('market-mode-label').textContent = mode;
+  document.getElementById('data-source-label').textContent = liveData.enabled ? parts.join(' | ') : 'Simulator prices';
+  document.getElementById('data-status').textContent = `${detail}${liveData.lastError ? ' ' + liveData.lastError : ''}`;
+  document.getElementById('data-status').style.color = liveData.lastError ? '#fbbf24' : '#9aa1b7';
 }
 
 function calcRSI(p, per = 14) {
@@ -695,6 +851,12 @@ function setRange(r) {
   rng = r;
   document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b.textContent === r));
   renderChart();
+}
+
+function openTradingView() {
+  const t = TICKERS.find(x => x.symbol === selSym);
+  const symbol = encodeURIComponent(t?.tv || selSym);
+  window.open(`https://www.tradingview.com/chart/?symbol=${symbol}`, '_blank', 'noopener,noreferrer');
 }
 
 function sel(sym) {
@@ -1178,8 +1340,9 @@ function renderAll() {
   renderStats();
 }
 
-function marketCycle() {
-  tickPrices();
+async function marketCycle() {
+  if (liveData.enabled) await refreshMarketData(false);
+  else tickPrices();
   updatePositions();
   decayCooldowns();
   updateDrawdown();
@@ -1206,9 +1369,10 @@ if (savedKey && rememberedKey) {
 
 syncRiskInputs();
 initHist();
+updateDataStatus();
 renderAll();
 updateClock();
-setInterval(marketCycle, 3000);
+marketTimer = setInterval(marketCycle, 5000);
 setInterval(updateClock, 1000);
 </script>
 </body>
