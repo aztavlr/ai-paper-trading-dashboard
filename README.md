@@ -29,6 +29,6 @@ TradingView widgets/charts are used only as visual references. TradingView does 
 
 ## Privacy
 
-The app is static and runs in the browser. It does not store user data on a project server. API keys are session-only by default, and users must explicitly opt in before an AI key is remembered on their own device.
+The app is static and runs in the browser. It does not store user data on a project server. API keys and Telegram details are session-only by default, and users must explicitly opt in before any remembered value is saved on their own device.
 
 See `PRIVACY.md` for details.

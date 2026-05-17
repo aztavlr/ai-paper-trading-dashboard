@@ -211,16 +211,21 @@
     <span class="subtle" id="data-source-label">Simulator prices</span>
   </div>
   <div class="data-grid">
-    <div class="field"><label>Alpaca Paper Key ID for stocks/ETFs</label><input type="password" id="alpaca-key" placeholder="Paper API Key ID" autocomplete="off"></div>
-    <div class="field"><label>Alpaca Secret Key</label><input type="password" id="alpaca-secret" placeholder="Paste only on your own device" autocomplete="off"></div>
+    <div class="field"><label>Alpaca Paper Key ID for stocks/ETFs</label><input type="password" id="alpaca-key" placeholder="Paper API Key ID" autocomplete="off" oninput="handleAlpacaInput()"></div>
+    <div class="field"><label>Alpaca Secret Key</label><input type="password" id="alpaca-secret" placeholder="Paste only on your own device" autocomplete="off" oninput="handleAlpacaInput()"></div>
     <button class="primary" onclick="enableLiveData()">Use Live Data</button>
     <button onclick="testAlpacaKeys()">Test Alpaca</button>
     <button onclick="refreshMarketData(true)">Update Now</button>
     <button onclick="disableLiveData()">Use Simulator</button>
   </div>
   <div id="data-status" class="status-line">Simulator mode is active. Paper trades use generated prices until live data is enabled.</div>
+  <label class="check-row" style="height:auto;margin-top:10px">
+    <input id="remember-alpaca" type="checkbox" onchange="handleAlpacaRememberChoice()">
+    Remember Alpaca keys on this device
+  </label>
+  <button onclick="clearAlpacaKeys()" style="margin-top:8px">Clear Alpaca keys</button>
   <div style="margin-top:8px;font-size:12px;color:var(--text3);line-height:1.6">
-    TradingView widgets can display charts, but TradingView does not provide an export/data API for prices. This dashboard uses public Binance/Coinbase crypto quotes and optional Alpaca market data for stocks/ETFs. Use Paper Trading keys from the Alpaca dashboard. Alpaca keys are not saved.
+    TradingView widgets can display charts, but TradingView does not provide an export/data API for prices. This dashboard uses public Binance/Coinbase crypto quotes and optional Alpaca market data for stocks/ETFs. Use Paper Trading keys from the Alpaca dashboard. Remembering keys stores them only in this browser on this device.
   </div>
 </div>
 
@@ -401,11 +406,16 @@
         </div>
       </div>
       <div class="tg-grid">
-        <div class="field"><label>Bot Token</label><input type="password" id="tg-tok" placeholder="1234567890:AABBccDDee..."></div>
-        <div class="field"><label>Chat ID</label><input type="text" id="tg-cid" placeholder="-1001234567890 or 123456789"></div>
+        <div class="field"><label>Bot Token</label><input type="password" id="tg-tok" placeholder="1234567890:AABBccDDee..." autocomplete="off" oninput="handleTelegramInput()"></div>
+        <div class="field"><label>Chat ID</label><input type="text" id="tg-cid" placeholder="-1001234567890 or 123456789" autocomplete="off" oninput="handleTelegramInput()"></div>
         <button class="primary" onclick="sendTestTG()">Test Alert</button>
         <button onclick="toggleGuide()">Setup guide</button>
       </div>
+      <label class="check-row" style="height:auto;margin-top:10px">
+        <input id="remember-telegram" type="checkbox" onchange="handleTelegramRememberChoice()">
+        Remember Telegram token and chat ID on this device
+      </label>
+      <button onclick="clearTelegramKeys()" style="margin-top:8px">Clear Telegram keys</button>
       <div class="status-line" id="tg-status"></div>
       <div class="guide" id="guide">
         <strong style="color:var(--text)">Telegram setup:</strong><br><br>
@@ -524,6 +534,54 @@ function getAlpacaCreds() {
     key: document.getElementById('alpaca-key')?.value.trim() || '',
     secret: document.getElementById('alpaca-secret')?.value.trim() || ''
   };
+}
+
+function handleAlpacaInput() {
+  const remember = document.getElementById('remember-alpaca')?.checked;
+  const creds = getAlpacaCreds();
+  if (remember && creds.key && creds.secret) {
+    saveRememberedSecret('tb_alpaca_key', creds.key);
+    saveRememberedSecret('tb_alpaca_secret', creds.secret);
+    localStorage.setItem('tb_alpaca_remembered', 'true');
+  }
+  if (!remember) clearStoredAlpacaKeys();
+}
+
+function handleAlpacaRememberChoice() {
+  const remember = document.getElementById('remember-alpaca').checked;
+  const status = document.getElementById('data-status');
+  if (remember) {
+    const creds = getAlpacaCreds();
+    if (creds.key && creds.secret) {
+      saveRememberedSecret('tb_alpaca_key', creds.key);
+      saveRememberedSecret('tb_alpaca_secret', creds.secret);
+      localStorage.setItem('tb_alpaca_remembered', 'true');
+      status.style.color = '#fbbf24';
+      status.textContent = 'Alpaca keys will be remembered only in this browser on this device.';
+    } else {
+      status.style.color = '#9aa1b7';
+      status.textContent = 'Paste both Alpaca keys to remember them on this device.';
+    }
+  } else {
+    clearStoredAlpacaKeys();
+    status.style.color = '#9aa1b7';
+    status.textContent = 'Alpaca keys will be used for this session only.';
+  }
+}
+
+function clearStoredAlpacaKeys() {
+  localStorage.removeItem('tb_alpaca_key');
+  localStorage.removeItem('tb_alpaca_secret');
+  localStorage.removeItem('tb_alpaca_remembered');
+}
+
+function clearAlpacaKeys() {
+  clearStoredAlpacaKeys();
+  document.getElementById('alpaca-key').value = '';
+  document.getElementById('alpaca-secret').value = '';
+  document.getElementById('remember-alpaca').checked = false;
+  document.getElementById('data-status').style.color = '#9aa1b7';
+  document.getElementById('data-status').textContent = 'Alpaca keys cleared from this page and browser storage.';
 }
 
 function hasAlpacaCreds() {
@@ -1157,6 +1215,61 @@ async function tgSend(text) {
   }
 }
 
+function getTelegramCreds() {
+  return {
+    token: document.getElementById('tg-tok')?.value.trim() || '',
+    chatId: document.getElementById('tg-cid')?.value.trim() || ''
+  };
+}
+
+function handleTelegramInput() {
+  const remember = document.getElementById('remember-telegram')?.checked;
+  const creds = getTelegramCreds();
+  if (remember && creds.token && creds.chatId) {
+    saveRememberedSecret('tb_tg_token', creds.token);
+    saveRememberedSecret('tb_tg_chat_id', creds.chatId);
+    localStorage.setItem('tb_tg_remembered', 'true');
+  }
+  if (!remember) clearStoredTelegramKeys();
+}
+
+function handleTelegramRememberChoice() {
+  const remember = document.getElementById('remember-telegram').checked;
+  const status = document.getElementById('tg-status');
+  if (remember) {
+    const creds = getTelegramCreds();
+    if (creds.token && creds.chatId) {
+      saveRememberedSecret('tb_tg_token', creds.token);
+      saveRememberedSecret('tb_tg_chat_id', creds.chatId);
+      localStorage.setItem('tb_tg_remembered', 'true');
+      status.style.color = '#fbbf24';
+      status.textContent = 'Telegram details will be remembered only in this browser on this device.';
+    } else {
+      status.style.color = '#9aa1b7';
+      status.textContent = 'Paste both Telegram fields to remember them on this device.';
+    }
+  } else {
+    clearStoredTelegramKeys();
+    status.style.color = '#9aa1b7';
+    status.textContent = 'Telegram details will be used for this session only.';
+  }
+}
+
+function clearStoredTelegramKeys() {
+  localStorage.removeItem('tb_tg_token');
+  localStorage.removeItem('tb_tg_chat_id');
+  localStorage.removeItem('tb_tg_remembered');
+}
+
+function clearTelegramKeys() {
+  clearStoredTelegramKeys();
+  document.getElementById('tg-tok').value = '';
+  document.getElementById('tg-cid').value = '';
+  document.getElementById('remember-telegram').checked = false;
+  document.getElementById('tg-status').style.color = '#9aa1b7';
+  document.getElementById('tg-status').textContent = 'Telegram details cleared from this page and browser storage.';
+}
+
 async function sendTestTG() {
   const s = document.getElementById('tg-status');
   s.style.color = '#9aa1b7';
@@ -1237,11 +1350,15 @@ function getApiKey() {
   return document.getElementById('api-key').value.trim();
 }
 
+function saveRememberedSecret(name, value) {
+  localStorage.setItem(name, value);
+}
+
 function handleKeyInput() {
   const k = document.getElementById('api-key').value.trim();
   const remember = document.getElementById('remember-key')?.checked;
   if (remember && k) {
-    localStorage.setItem('tb_api_key', k);
+    saveRememberedSecret('tb_api_key', k);
     localStorage.setItem('tb_api_key_remembered', 'true');
   }
   if (remember && !k) {
@@ -1259,7 +1376,7 @@ function handleRememberChoice() {
   const remember = document.getElementById('remember-key').checked;
   const k = document.getElementById('api-key').value.trim();
   if (remember && k) {
-    localStorage.setItem('tb_api_key', k);
+    saveRememberedSecret('tb_api_key', k);
     localStorage.setItem('tb_api_key_remembered', 'true');
     document.getElementById('api-status').style.color = '#fbbf24';
     document.getElementById('api-status').textContent = 'AI key will be remembered only in this browser.';
@@ -1301,7 +1418,7 @@ async function testApiKey() {
       s.style.color = '#4ade80';
       s.textContent = 'API key verified. AI chat is ready.';
       if (document.getElementById('remember-key').checked) {
-        localStorage.setItem('tb_api_key', k);
+        saveRememberedSecret('tb_api_key', k);
         localStorage.setItem('tb_api_key_remembered', 'true');
       }
     } else {
@@ -1417,6 +1534,32 @@ if (savedKey && rememberedKey) {
   localStorage.removeItem('tb_api_key_remembered');
   document.getElementById('api-status').style.color = '#9aa1b7';
   document.getElementById('api-status').textContent = 'A previously saved AI key was cleared for privacy. Paste it again if needed.';
+}
+
+const savedAlpacaKey = localStorage.getItem('tb_alpaca_key');
+const savedAlpacaSecret = localStorage.getItem('tb_alpaca_secret');
+const rememberedAlpaca = localStorage.getItem('tb_alpaca_remembered') === 'true';
+if (rememberedAlpaca && savedAlpacaKey && savedAlpacaSecret) {
+  document.getElementById('remember-alpaca').checked = true;
+  document.getElementById('alpaca-key').value = savedAlpacaKey;
+  document.getElementById('alpaca-secret').value = savedAlpacaSecret;
+  document.getElementById('data-status').style.color = '#fbbf24';
+  document.getElementById('data-status').textContent = 'Remembered Alpaca keys loaded from this browser only.';
+} else if (savedAlpacaKey || savedAlpacaSecret) {
+  clearStoredAlpacaKeys();
+}
+
+const savedTgToken = localStorage.getItem('tb_tg_token');
+const savedTgChatId = localStorage.getItem('tb_tg_chat_id');
+const rememberedTelegram = localStorage.getItem('tb_tg_remembered') === 'true';
+if (rememberedTelegram && savedTgToken && savedTgChatId) {
+  document.getElementById('remember-telegram').checked = true;
+  document.getElementById('tg-tok').value = savedTgToken;
+  document.getElementById('tg-cid').value = savedTgChatId;
+  document.getElementById('tg-status').style.color = '#fbbf24';
+  document.getElementById('tg-status').textContent = 'Remembered Telegram details loaded from this browser only.';
+} else if (savedTgToken || savedTgChatId) {
+  clearStoredTelegramKeys();
 }
 
 syncRiskInputs();

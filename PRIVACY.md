@@ -9,10 +9,11 @@ This project is a static browser app. It has no backend server controlled by thi
 - Telegram token and chat id form fields
 - Anthropic API key form field
 - Alpaca API key and secret form fields
+- Telegram bot token and chat id form fields
 
-The Anthropic key is session-only by default. It is saved to this browser's local storage only when the user explicitly enables "Remember AI key on this device."
+Keys and tokens are session-only by default. They are saved to this browser's local storage only when the user explicitly enables a "Remember ... on this device" checkbox.
 
-Alpaca keys are session-only and are not saved by this app.
+Remembered values are not uploaded to GitHub or to a project server. They can still be accessed by someone who has access to the same browser profile or device, so use them only on a trusted personal device.
 
 ## What Leaves the Browser
 
