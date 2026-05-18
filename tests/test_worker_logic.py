@@ -122,6 +122,37 @@ def test_committed_symbols_from_positions_and_orders():
     assert committed == {"AAPL", "BTC/USD", "MSFT"}
 
 
+def test_event_label_and_activity_graph():
+    events = [
+        {
+            "created_at": "2026-05-18T10:00:00Z",
+            "type": "python_paper_order",
+            "symbol": "AAPL",
+            "payload": {
+                "qty": 2,
+                "analysis": {"confidence": 81, "rr": 2.1, "stop": 95, "target": 110},
+            },
+        },
+        {
+            "created_at": "2026-05-18T10:05:00Z",
+            "type": "crypto_managed_close",
+            "symbol": "BTC/USD",
+            "payload": {"qty": 0.01, "reason": "crypto target hit", "levered_pnl_pct": 4.2},
+        },
+    ]
+    assert "AUTO BUY | AAPL" in worker.event_label(events[0])
+    assert "paper P&L 4.20%" in worker.event_label(events[1])
+    graph = worker.render_activity_graph(events)
+    assert "Exposure graph" in graph
+    assert "#" in graph
+
+
+def test_plain_command_aliases():
+    assert worker.normalize_command_text("auto on") == "/auto_on"
+    assert worker.normalize_command_text("history 20") == "/history 20"
+    assert worker.normalize_command_text("buy BTC/USD") == "/buy BTC/USD"
+
+
 if __name__ == "__main__":
     tests = [
         test_symbol_normalization,
@@ -129,6 +160,8 @@ if __name__ == "__main__":
         test_position_sizing_respects_risk_and_leverage,
         test_analyze_bars_warmup_and_signal_shape,
         test_committed_symbols_from_positions_and_orders,
+        test_event_label_and_activity_graph,
+        test_plain_command_aliases,
     ]
     for test in tests:
         test()

@@ -24,6 +24,7 @@ If Cloudflare asks for Python Worker tooling, follow Cloudflare's Python Worker 
 ## Telegram Commands
 
 - `/auto_on` or `/start_trading`
+- Plain aliases: `auto on`, `auto off`, `history`, `timeline`, `graph`
 - `/auto_off` or `/stop_trading`
 - `/scan_now`
 - `/paper_buy AAPL`
@@ -44,6 +45,8 @@ If Cloudflare asks for Python Worker tooling, follow Cloudflare's Python Worker 
 - `/set leverage 2`
 - `/set fast_scan on`
 - `/latency`
+- `/history 20`
+- `/timeline 20` or `/graph`
 - `/crypto_on` or `/crypto_off`
 - `/test`
 
@@ -69,6 +72,8 @@ The Python Worker uses:
 - Crypto source validation across Alpaca, Coinbase Exchange, and Binance Spot
 - TradingView chart links in readouts for visual confirmation
 - Lower-latency scan mode that reuses position/order snapshots and requests fewer candles
+- Telegram trade history commands backed by Supabase events
+- Text timeline and exposure graph after `/auto_on`, `/auto_off`, `/history`, and `/timeline`
 
 ## Crypto And Leverage
 
@@ -107,7 +112,7 @@ Fast scan mode reduces repeated broker calls during scans and uses smaller candl
 
 ## Free Built-In Review
 
-The bot includes a free `/ai AAPL` review command that runs inside the Worker. It does not call Claude, OpenAI, or any paid external model. It summarizes the setup, main risk, invalidation level, and educational next step from the bot's own indicator engine.
+The bot includes a free `/ai AAPL` review command that runs inside the Worker. It does not call Claude, OpenAI, or any paid external model. It summarizes the setup, main risk, invalidation level, and next review step from the bot's own indicator engine.
 
 ## Local Checks
 

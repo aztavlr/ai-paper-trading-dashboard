@@ -57,6 +57,12 @@ SETTING_ALIASES = {
 FAST_PRIMARY_LIMIT = 120
 FAST_HIGHER_LIMIT = 90
 FULL_PRIMARY_LIMIT = 180
+HISTORY_DEFAULT_LIMIT = 15
+HISTORY_MAX_LIMIT = 40
+
+ORDER_EVENT_TYPES = {"python_paper_order", "manual_python_order", "force_python_order"}
+CLOSE_EVENT_TYPES = {"crypto_managed_close", "close_all"}
+TRADE_RELATED_EVENT_TYPES = ORDER_EVENT_TYPES | CLOSE_EVENT_TYPES | {"risk_guard", "auto_state", "python_scan"}
 
 CRYPTO_ALIASES = {
     "BTC": "BTC/USD",
@@ -251,6 +257,198 @@ async def log_event(env, type_, payload=None, symbol=None):
         )
     except Exception:
         pass
+
+
+def parse_history_limit(value, default=HISTORY_DEFAULT_LIMIT):
+    try:
+        limit = int(str(value or "").strip())
+    except Exception:
+        limit = default
+    return max(1, min(HISTORY_MAX_LIMIT, limit))
+
+
+async def fetch_events(env, limit=HISTORY_DEFAULT_LIMIT):
+    if not has_supabase(env):
+        return []
+    owner = owner_id(env)
+    safe_limit = parse_history_limit(limit)
+    rows = await supabase(
+        env,
+        f"/rest/v1/bot_events?owner_id=eq.{quote(owner, safe='')}&select=created_at,type,symbol,payload&order=created_at.desc&limit={safe_limit}",
+    )
+    return rows if isinstance(rows, list) else []
+
+
+def event_payload(event):
+    payload = event.get("payload") if isinstance(event, dict) else {}
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except Exception:
+            payload = {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def event_symbol(event):
+    payload = event_payload(event)
+    return str((event or {}).get("symbol") or payload.get("symbol") or "").upper()
+
+
+def event_time_label(value):
+    text = str(value or "")
+    if "T" in text and len(text) >= 16:
+        return text[5:16].replace("T", " ")
+    return text[:16] if text else "time n/a"
+
+
+def compact_number(value, suffix=""):
+    try:
+        number = float(value)
+    except Exception:
+        return "n/a"
+    if not math.isfinite(number):
+        return "n/a"
+    if abs(number) >= 100:
+        return f"{number:.0f}{suffix}"
+    if abs(number) >= 10:
+        return f"{number:.1f}{suffix}"
+    return f"{number:.2f}{suffix}"
+
+
+def money_value(value):
+    try:
+        return money(float(value))
+    except Exception:
+        return "$0.00"
+
+
+def event_label(event):
+    event = event if isinstance(event, dict) else {}
+    payload = event_payload(event)
+    event_type = str(event.get("type") or "event")
+    symbol = event_symbol(event)
+    analysis = payload.get("analysis") if isinstance(payload.get("analysis"), dict) else {}
+
+    if event_type in ORDER_EVENT_TYPES:
+        action = {
+            "python_paper_order": "AUTO BUY",
+            "manual_python_order": "MANUAL BUY",
+            "force_python_order": "FORCED BUY",
+        }.get(event_type, "BUY")
+        parts = [action, symbol or "symbol n/a"]
+        if payload.get("qty") is not None:
+            parts.append(f"qty {compact_number(payload.get('qty'))}")
+        if analysis.get("confidence") is not None:
+            parts.append(f"conf {compact_number(analysis.get('confidence'), '%')}")
+        if analysis.get("rr") is not None:
+            parts.append(f"RR {compact_number(analysis.get('rr'), 'R')}")
+        if analysis.get("stop") is not None and analysis.get("target") is not None:
+            parts.append(f"stop {money_value(analysis.get('stop'))}")
+            parts.append(f"target {money_value(analysis.get('target'))}")
+        return " | ".join(parts)
+
+    if event_type == "crypto_managed_close":
+        reason = str(payload.get("reason") or "managed close")
+        parts = ["CLOSE", symbol or "symbol n/a", reason]
+        if payload.get("qty") is not None:
+            parts.append(f"qty {compact_number(payload.get('qty'))}")
+        if payload.get("price") is not None:
+            parts.append(f"price {money_value(payload.get('price'))}")
+        if payload.get("levered_pnl_pct") is not None:
+            parts.append(f"paper P&L {compact_number(payload.get('levered_pnl_pct'), '%')}")
+        elif payload.get("pnl_pct") is not None:
+            parts.append(f"P&L {compact_number(payload.get('pnl_pct'), '%')}")
+        return " | ".join(parts)
+
+    if event_type == "close_all":
+        return f"CLOSE ALL | positions {payload.get('positions', 0)} | orders {payload.get('orders', 0)}"
+
+    if event_type == "risk_guard":
+        reason = str(payload.get("reason") or "guard")
+        if payload.get("daily_loss") is not None:
+            return f"RISK GUARD | {reason} | day P&L {money_value(payload.get('daily_loss'))}"
+        return f"RISK GUARD | {reason}"
+
+    if event_type == "auto_state":
+        return f"AUTO {'ON' if payload.get('running') else 'OFF'}"
+
+    if event_type == "python_scan":
+        return "SCAN | scanned {scanned} | orders {orders} | blocked {blocked}".format(
+            scanned=payload.get("scanned", 0),
+            orders=payload.get("orders", 0),
+            blocked=payload.get("blocked", 0),
+        )
+
+    if event_type.endswith("_error") or event_type.endswith("_warning"):
+        return f"WARNING | {str(payload.get('message') or event_type)[:120]}"
+
+    label = event_type.replace("_", " ").upper()
+    return f"{label}{f' | {symbol}' if symbol else ''}"
+
+
+def trade_activity_delta(event):
+    event_type = str((event or {}).get("type") or "")
+    if event_type in ORDER_EVENT_TYPES:
+        return 1
+    if event_type == "close_all":
+        try:
+            return -max(1, int(event_payload(event).get("positions") or 1))
+        except Exception:
+            return -1
+    if event_type in CLOSE_EVENT_TYPES:
+        return -1
+    return 0
+
+
+def render_activity_graph(events):
+    exposure = 0
+    points = []
+    for event in events:
+        event_type = str((event or {}).get("type") or "")
+        if event_type not in TRADE_RELATED_EVENT_TYPES:
+            continue
+        exposure = max(0, exposure + trade_activity_delta(event))
+        if event_type in ORDER_EVENT_TYPES or event_type in CLOSE_EVENT_TYPES:
+            points.append((event_time_label(event.get("created_at")), exposure, event_type))
+    if not points:
+        return "Exposure graph: no trade open/close events yet."
+    max_exposure = max(1, max(point[1] for point in points))
+    lines = ["Exposure graph (recent paper trade count):"]
+    for timestamp, value, event_type in points[-12:]:
+        width = 18
+        bar_len = 0 if value <= 0 else max(1, round((value / max_exposure) * width))
+        bar = "#" * bar_len if bar_len else "."
+        label = "buy" if event_type in ORDER_EVENT_TYPES else "close"
+        lines.append(f"{timestamp} {bar:<18} {value} {label}")
+    return "\n".join(lines)
+
+
+def render_trade_timeline(events, include_graph=False):
+    filtered = [event for event in events if str((event or {}).get("type") or "") in TRADE_RELATED_EVENT_TYPES]
+    if not filtered:
+        return "No paper trading history yet. Run /scan_now or /paper_buy SYMBOL first."
+    chronological = list(reversed(filtered))
+    lines = ["Recent paper trading timeline:"]
+    for event in chronological[-HISTORY_MAX_LIMIT:]:
+        lines.append(f"{event_time_label(event.get('created_at'))} - {event_label(event)}")
+    if include_graph:
+        lines.extend(["", render_activity_graph(chronological)])
+    return "\n".join(lines)
+
+
+async def history_text(env, raw_limit=None, include_graph=False):
+    if not has_supabase(env):
+        return "History needs the Supabase backend secrets configured on the Worker."
+    limit = parse_history_limit(raw_limit)
+    events = await fetch_events(env, limit)
+    return render_trade_timeline(events, include_graph)
+
+
+async def safe_history_text(env, raw_limit=None, include_graph=False):
+    try:
+        return await history_text(env, raw_limit, include_graph)
+    except Exception as exc:
+        return f"History unavailable right now: {exc}"
 
 
 async def get_setting(env, key):
@@ -738,7 +936,7 @@ async def clear_managed_crypto_position(env, symbol):
     await state_put(env, await managed_position_key(symbol), {"closed": True, "closed_at": now_ms()})
 
 
-async def close_crypto_position(env, symbol, qty, reason):
+async def close_crypto_position(env, symbol, qty, reason, details=None):
     order = await alpaca(env, "/v2/orders", method="POST", body={
         "symbol": symbol,
         "qty": str(qty),
@@ -747,7 +945,10 @@ async def close_crypto_position(env, symbol, qty, reason):
         "time_in_force": "gtc",
     })
     await clear_managed_crypto_position(env, symbol)
-    await log_event(env, "crypto_managed_close", {"symbol": symbol, "qty": qty, "reason": reason, "order_id": order.get("id")}, symbol)
+    payload = {"symbol": symbol, "qty": qty, "reason": reason, "order_id": order.get("id")}
+    if isinstance(details, dict):
+        payload.update(details)
+    await log_event(env, "crypto_managed_close", payload, symbol)
     return order
 
 
@@ -779,8 +980,18 @@ async def manage_crypto_positions(env):
         elif leverage > 1 and price <= liquidation_ref:
             reason = "paper leverage liquidation guard"
         if reason:
-            await close_crypto_position(env, symbol, qty, reason)
-            await safe_send_message(env, f"{reason.upper()}: closed {symbol}\nQty: {qty}\nPrice ref: {money(price)}\nStop: {money(stop)} | Target: {money(target)}\nLeverage mode: paper {leverage}x")
+            pnl_pct = ((price - entry) / max(entry, 0.0001)) * 100
+            levered_pnl_pct = pnl_pct * max(leverage, 1)
+            await close_crypto_position(env, symbol, qty, reason, {
+                "price": price,
+                "entry_ref": entry,
+                "stop": stop,
+                "target": target,
+                "leverage": leverage,
+                "pnl_pct": pnl_pct,
+                "levered_pnl_pct": levered_pnl_pct,
+            })
+            await safe_send_message(env, f"{reason.upper()}: closed {symbol}\nQty: {qty}\nPrice ref: {money(price)}\nStop: {money(stop)} | Target: {money(target)}\nPaper P&L ref: {levered_pnl_pct:.2f}% at {leverage}x\nLeverage mode: paper {leverage}x")
 
 
 async def submit_bracket_buy(env, symbol, qty, analysis):
@@ -820,7 +1031,7 @@ def strategy_text(risk):
         f"Crypto leverage: {risk['crypto_leverage']}x paper simulation only; Alpaca executes spot orders without leverage.",
         "Reads: EMA trend, higher-timeframe alignment, RSI, MACD, Bollinger position, VWAP, volume, ATR volatility, support/resistance, and candlestick patterns.",
         "Free built-in analyst command: /ai AAPL. No paid AI key required.",
-        "Still educational paper trading only. No method is 100% accurate.",
+        "No method is 100% accurate; risk guards stay active.",
     ])
 
 
@@ -873,7 +1084,7 @@ def built_in_ai_review(symbol, analysis, risk, positions):
         f"Best evidence: {best_evidence}",
         f"Main risk: {' '.join(risks[:3])}",
         f"Invalidation: {' '.join(invalidation[:3])}",
-        "Educational next step: compare this setup against the last 20 similar signals before trusting automation.",
+        "Next review step: compare this setup against the last 20 similar signals before trusting automation.",
     ])
 
 
@@ -1095,6 +1306,7 @@ async def close_all_positions(env):
         if is_crypto_symbol(symbol):
             await clear_managed_crypto_position(env, symbol)
     await state_put(env, "RUNNING", "false")
+    await log_event(env, "close_all", {"positions": len(positions), "orders": len(open_orders)})
     return await send_message(env, f"Close-all request sent for {len(positions)} positions and {len(open_orders)} open orders. Auto-trading is now OFF.")
 
 
@@ -1229,9 +1441,54 @@ async def settings_text(env):
     ])
 
 
+def normalize_command_text(text):
+    raw = str(text or "").strip()
+    if not raw or raw.startswith("/"):
+        return raw
+    tokens = raw.split()
+    lowered = [token.lower() for token in tokens]
+    first = lowered[0]
+    two = " ".join(lowered[:2]) if len(lowered) >= 2 else first
+    two_word_aliases = {
+        "auto on": "/auto_on",
+        "auto start": "/auto_on",
+        "start trading": "/start_trading",
+        "turn on": "/auto_on",
+        "auto off": "/auto_off",
+        "auto stop": "/auto_off",
+        "stop trading": "/stop_trading",
+        "turn off": "/auto_off",
+        "scan now": "/scan_now",
+        "show history": "/history",
+        "trade history": "/history",
+        "show timeline": "/timeline",
+        "show graph": "/graph",
+    }
+    one_word_aliases = {
+        "help": "/help",
+        "status": "/status",
+        "positions": "/positions",
+        "history": "/history",
+        "trades": "/trades",
+        "timeline": "/timeline",
+        "graph": "/graph",
+        "settings": "/settings",
+        "strategy": "/strategy",
+        "latency": "/latency",
+    }
+    if two in two_word_aliases:
+        return " ".join([two_word_aliases[two]] + tokens[2:])
+    if first in one_word_aliases:
+        return " ".join([one_word_aliases[first]] + tokens[1:])
+    if first == "buy" and len(tokens) > 1:
+        return " ".join(["/buy"] + tokens[1:])
+    return raw
+
+
 def help_text():
     return "\n".join([
         "Python Worker commands:",
+        "Plain aliases also work: auto on, auto off, history, timeline, graph",
         "/auto_on or /start_trading - start paper automation",
         "/auto_off or /stop_trading - stop new paper orders",
         "/scan_now - scan now",
@@ -1247,6 +1504,8 @@ def help_text():
         "/set data_mismatch 1.25 - max crypto source mismatch",
         "/set fast_scan on - lower-latency scan mode",
         "/latency - measure Worker/API latency",
+        "/history 20 - recent trading events",
+        "/timeline 20 or /graph - timeline plus text graph",
         "/crypto_on or /crypto_off - toggle crypto scanning",
         "/status - show account/bot status",
         "/positions - show positions",
@@ -1259,18 +1518,25 @@ def help_text():
 
 
 async def handle_command(env, text):
+    text = normalize_command_text(text)
     parts = text.split()
+    if not parts:
+        return await send_message(env, help_text())
     cmd = parts[0].lower()
     rest = parts[1:]
     if cmd in {"/start", "/help"}:
         return await send_message(env, help_text())
     if cmd in {"/start_trading", "/starttrading", "/auto_on"}:
         await state_put(env, "RUNNING", "true")
-        await send_message(env, "Python Worker paper auto-trading is ON.")
+        await log_event(env, "auto_state", {"running": True, "command": cmd})
+        recent = await safe_history_text(env, 10, True)
+        await send_message(env, f"Python Worker paper auto-trading is ON.\n\n{recent}")
         return await trade_loop(env, True)
     if cmd in {"/stop_trading", "/stoptrading", "/auto_off"}:
         await state_put(env, "RUNNING", "false")
-        return await send_message(env, "Python Worker paper auto-trading is OFF.")
+        await log_event(env, "auto_state", {"running": False, "command": cmd})
+        recent = await safe_history_text(env, 10, True)
+        return await send_message(env, f"Python Worker paper auto-trading is OFF.\n\n{recent}")
     if cmd == "/scan_now":
         return await trade_loop(env, True)
     if cmd == "/crypto_on":
@@ -1295,6 +1561,10 @@ async def handle_command(env, text):
         return await send_message(env, await status_text(env))
     if cmd == "/latency":
         return await send_message(env, await latency_text(env))
+    if cmd in {"/history", "/trades"}:
+        return await send_message(env, await history_text(env, rest[0] if rest else HISTORY_DEFAULT_LIMIT, False))
+    if cmd in {"/timeline", "/graph"}:
+        return await send_message(env, await history_text(env, rest[0] if rest else HISTORY_DEFAULT_LIMIT, True))
     if cmd == "/positions":
         return await send_message(env, await positions_text(env))
     if cmd == "/close_all":
